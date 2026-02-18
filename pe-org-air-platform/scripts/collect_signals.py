@@ -315,7 +315,7 @@ def main() -> int:
             else:
                 print(f"SKIP: {ticker} no patents rss returned for query={pat_q}")
 
-        print("\n✅ OK: External signals collection completed")
+        print("\nOK: External signals collection completed")
         return 0
 
     finally:

@@ -3,6 +3,10 @@
 -- (Snowflake-compatible: no CHECK, no INDEX)
 -- ==========================================
 
+-- =========================================================
+-- CS1: Core Foundation
+-- =========================================================
+
 -- Industries table
 CREATE TABLE IF NOT EXISTS industries (
     id STRING PRIMARY KEY,
@@ -16,7 +20,7 @@ CREATE TABLE IF NOT EXISTS industries (
 CREATE TABLE IF NOT EXISTS companies (
     id STRING PRIMARY KEY,
     name STRING NOT NULL,
-    ticker STRING,
+    ticker STRING UNIQUE,
     industry_id STRING,
     position_factor NUMBER(4,3) DEFAULT 0.0,
     is_deleted BOOLEAN DEFAULT FALSE,
@@ -61,7 +65,7 @@ CREATE TABLE IF NOT EXISTS dimension_scores (
 -- =========================================================
 -- CS2: Evidence Collection (Documents + Chunks)
 -- =========================================================
- 
+
 CREATE TABLE IF NOT EXISTS documents (
   id STRING PRIMARY KEY,
   company_id STRING NOT NULL,
@@ -74,12 +78,15 @@ CREATE TABLE IF NOT EXISTS documents (
   content_hash STRING,
   word_count INT,
   chunk_count INT,
-  status STRING DEFAULT 'pending',  
+  status STRING DEFAULT 'pending',
   error_message STRING,
   created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-  processed_at TIMESTAMP_NTZ
+  processed_at TIMESTAMP_NTZ,
+  CONSTRAINT uq_documents_content_hash UNIQUE (content_hash),
+  CONSTRAINT fk_documents_company
+    FOREIGN KEY (company_id) REFERENCES companies(id)
 );
- 
+
 CREATE TABLE IF NOT EXISTS document_chunks (
   id STRING PRIMARY KEY,
   document_id STRING NOT NULL,
@@ -90,8 +97,14 @@ CREATE TABLE IF NOT EXISTS document_chunks (
   end_char INT,
   word_count INT,
   created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-  CONSTRAINT uq_doc_chunk UNIQUE (document_id, chunk_index)
+  CONSTRAINT uq_doc_chunk UNIQUE (document_id, chunk_index),
+  CONSTRAINT fk_document_chunks_document
+    FOREIGN KEY (document_id) REFERENCES documents(id)
 );
+
+-- =========================================================
+-- CS1 Seed: Industry reference rows (idempotent)
+-- =========================================================
 
 MERGE INTO industries t
 USING (
@@ -109,7 +122,7 @@ VALUES (s.id, s.name, s.sector, s.hr_base);
 -- =========================================================
 -- CS2: External Signals
 -- =========================================================
- 
+
 CREATE TABLE IF NOT EXISTS external_signals (
   id STRING PRIMARY KEY,
   company_id STRING NOT NULL,
@@ -123,19 +136,104 @@ CREATE TABLE IF NOT EXISTS external_signals (
   content_text STRING,
   content_hash STRING,
   metadata VARIANT,
-  CONSTRAINT uq_external_signals_hash UNIQUE (content_hash)
+  CONSTRAINT uq_external_signals_hash UNIQUE (content_hash),
+  CONSTRAINT fk_external_signals_company
+    FOREIGN KEY (company_id) REFERENCES companies(id)
 );
- 
- 
 
 CREATE TABLE IF NOT EXISTS company_signal_summaries (
   id STRING PRIMARY KEY,
   company_id STRING NOT NULL,
   ticker STRING NOT NULL,
   as_of_date DATE NOT NULL,
- 
+
   summary_text STRING NOT NULL,
   signal_count INT DEFAULT 0,
+  created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  CONSTRAINT uq_company_signal_summary_company_day UNIQUE (company_id, as_of_date),
+  CONSTRAINT fk_company_signal_summaries_company
+    FOREIGN KEY (company_id) REFERENCES companies(id)
+);
+
+-- =========================================================
+-- CS3: Scoring Engine (Scores + Config + Audit)
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS scoring_runs (
+  id STRING PRIMARY KEY,
+  run_timestamp TIMESTAMP_NTZ NOT NULL,
+  companies_scored VARIANT,
+  model_version STRING,
+  parameters_json VARIANT,
+  status STRING,
   created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
+CREATE TABLE IF NOT EXISTS org_air_scores (
+  id STRING PRIMARY KEY,
+  company_id STRING NOT NULL,
+  assessment_id STRING,
+  vr_score NUMBER(5,2),
+  synergy_bonus NUMBER(5,2),
+  talent_penalty NUMBER(5,2),
+  sem_lower NUMBER(5,2),
+  sem_upper NUMBER(5,2),
+  composite_score NUMBER(5,2),
+  score_band STRING,
+  dimension_breakdown_json VARIANT,
+  scoring_run_id STRING,
+  scored_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  CONSTRAINT fk_org_air_scores_company
+    FOREIGN KEY (company_id) REFERENCES companies(id),
+  CONSTRAINT fk_org_air_scores_assessment
+    FOREIGN KEY (assessment_id) REFERENCES assessments(id),
+  CONSTRAINT fk_org_air_scores_run
+    FOREIGN KEY (scoring_run_id) REFERENCES scoring_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS scoring_audit_log (
+  id STRING PRIMARY KEY,
+  scoring_run_id STRING NOT NULL,
+  company_id STRING,
+  step_name STRING NOT NULL,
+  input_json VARIANT,
+  output_json VARIANT,
+  created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  CONSTRAINT fk_scoring_audit_log_run
+    FOREIGN KEY (scoring_run_id) REFERENCES scoring_runs(id),
+  CONSTRAINT fk_scoring_audit_log_company
+    FOREIGN KEY (company_id) REFERENCES companies(id)
+);
+
+CREATE TABLE IF NOT EXISTS sector_baselines (
+  id STRING PRIMARY KEY,
+  sector_name STRING NOT NULL,
+  dimension STRING,
+  weight NUMBER(4,3),
+  hr_baseline_value NUMBER(5,2),
+  version STRING NOT NULL,
+  created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS synergy_config (
+  id STRING PRIMARY KEY,
+  dimension_a STRING NOT NULL,
+  dimension_b STRING NOT NULL,
+  synergy_type STRING NOT NULL,  -- positive | negative
+  threshold NUMBER(5,2) NOT NULL,
+  magnitude NUMBER(5,2) NOT NULL,
+  version STRING NOT NULL,
+  created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS talent_penalty_config (
+  id STRING PRIMARY KEY,
+  hhi_threshold_mild NUMBER(5,3) NOT NULL,
+  hhi_threshold_severe NUMBER(5,3) NOT NULL,
+  penalty_factor_mild NUMBER(5,3) NOT NULL,
+  penalty_factor_severe NUMBER(5,3) NOT NULL,
+  min_sample_size INT NOT NULL,
+  version STRING NOT NULL,
+  created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);

@@ -8,10 +8,11 @@ def list_documents(
    ticker: str | None = Query(default=None),
    company_id: str | None = Query(default=None),
    limit: int = Query(default=100, ge=1, le=500),
+   offset: int = Query(default=0, ge=0),
 ):
    store = EvidenceStore()
    try:
-       return store.list_documents(ticker=ticker, company_id=company_id, limit=limit)
+       return store.list_documents(ticker=ticker, company_id=company_id, limit=limit, offset=offset)
    finally:
        store.close()
 

@@ -44,11 +44,22 @@ def get_company_id(ticker: str) -> str:
     conn = get_snowflake_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id FROM companies WHERE ticker=%s LIMIT 1", (ticker,))
-        row = cur.fetchone()
-        if not row:
+        cur.execute(
+            """
+            SELECT id
+            FROM companies
+            WHERE ticker=%s AND is_deleted=FALSE
+            ORDER BY created_at DESC
+            LIMIT 2
+            """,
+            (ticker,),
+        )
+        rows = cur.fetchall()
+        if not rows:
             raise RuntimeError(f"Missing company row for {ticker}. Run backfill_companies.py")
-        return str(row[0])
+        if len(rows) > 1:
+            raise RuntimeError(f"Duplicate active company rows found for ticker={ticker}")
+        return str(rows[0][0])
     finally:
         cur.close()
         conn.close()

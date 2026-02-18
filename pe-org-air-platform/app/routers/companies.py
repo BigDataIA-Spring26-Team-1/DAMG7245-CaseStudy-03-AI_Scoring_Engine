@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +13,17 @@ from app.services.redis_cache import cache_delete, cache_get_json, cache_set_jso
 from app.services.snowflake import get_snowflake_connection
 
 router = APIRouter(prefix="/companies")
+
+
+def _is_unique_constraint_violation(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "unique" in msg and ("constraint" in msg or "key" in msg)
+
+
+def _ticker_conflict_detail(ticker: str | None) -> str:
+    if ticker:
+        return f"Ticker already exists: {ticker}"
+    return "Company ticker already exists"
 
 
 def _row_to_company_out(row: tuple[Any, ...]) -> CompanyOut:
@@ -32,7 +43,7 @@ def _row_to_company_out(row: tuple[Any, ...]) -> CompanyOut:
 @router.post("", response_model=CompanyOut, status_code=201)
 def create_company(payload: CompanyCreate) -> CompanyOut:
     company_id = str(uuid4())
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     industry_id = str(payload.industry_id) if payload.industry_id is not None else None
 
     conn = get_snowflake_connection()
@@ -47,21 +58,31 @@ def create_company(payload: CompanyCreate) -> CompanyOut:
             if cur.fetchone() is None:
                 raise HTTPException(status_code=400, detail="Invalid industry_id")
 
-        cur.execute(
-            """
-            INSERT INTO companies (id, name, ticker, industry_id, position_factor, is_deleted, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, FALSE, %s, %s)
-            """,
-            (
-                company_id,
-                payload.name,
-                payload.ticker,
-                industry_id,
-                payload.position_factor,
-                now,
-                now,
-            ),
-        )
+        if payload.ticker:
+            cur.execute("SELECT id FROM companies WHERE ticker = %s LIMIT 1", (payload.ticker,))
+            if cur.fetchone() is not None:
+                raise HTTPException(status_code=409, detail=_ticker_conflict_detail(payload.ticker))
+
+        try:
+            cur.execute(
+                """
+                INSERT INTO companies (id, name, ticker, industry_id, position_factor, is_deleted, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, FALSE, %s, %s)
+                """,
+                (
+                    company_id,
+                    payload.name,
+                    payload.ticker,
+                    industry_id,
+                    payload.position_factor,
+                    now,
+                    now,
+                ),
+            )
+        except Exception as exc:
+            if _is_unique_constraint_violation(exc):
+                raise HTTPException(status_code=409, detail=_ticker_conflict_detail(payload.ticker))
+            raise
 
         cur.execute(
             """
@@ -237,6 +258,12 @@ def update_company(company_id: str, payload: CompanyUpdate) -> CompanyOut:
             updates.append("name = %s")
             params.append(payload.name)
         if payload.ticker is not None:
+            cur.execute(
+                "SELECT 1 FROM companies WHERE ticker = %s AND id <> %s LIMIT 1",
+                (payload.ticker, company_id),
+            )
+            if cur.fetchone() is not None:
+                raise HTTPException(status_code=409, detail=_ticker_conflict_detail(payload.ticker))
             updates.append("ticker = %s")
             params.append(payload.ticker)
         if payload.industry_id is not None:
@@ -254,7 +281,12 @@ def update_company(company_id: str, payload: CompanyUpdate) -> CompanyOut:
         else:
             sql = f"UPDATE companies SET {', '.join(updates)} WHERE id = %s"
             params.append(company_id)
-            cur.execute(sql, tuple(params))
+            try:
+                cur.execute(sql, tuple(params))
+            except Exception as exc:
+                if _is_unique_constraint_violation(exc):
+                    raise HTTPException(status_code=409, detail=_ticker_conflict_detail(payload.ticker))
+                raise
 
         cur.execute(
             """

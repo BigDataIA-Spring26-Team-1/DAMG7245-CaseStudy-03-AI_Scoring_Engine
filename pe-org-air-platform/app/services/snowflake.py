@@ -1,16 +1,21 @@
 from app.config import settings
  
+_snowflake_import_error: Exception | None = None
 try:
-    import snowflake.connector
-except Exception:
-    snowflake = None
+    import snowflake.connector as snowflake_connector
+except Exception as exc:
+    snowflake_connector = None
+    _snowflake_import_error = exc
  
  
 def get_snowflake_connection():
+    if snowflake_connector is None:
+        raise RuntimeError("snowflake-connector-python is not installed or failed to import") from _snowflake_import_error
+
     if not settings.snowflake_account or not settings.snowflake_user or not settings.snowflake_password:
         raise RuntimeError("Snowflake credentials missing (SNOWFLAKE_ACCOUNT/USER/PASSWORD)")
  
-    return snowflake.connector.connect(
+    return snowflake_connector.connect(
         account=settings.snowflake_account,
         user=settings.snowflake_user,
         password=settings.snowflake_password,

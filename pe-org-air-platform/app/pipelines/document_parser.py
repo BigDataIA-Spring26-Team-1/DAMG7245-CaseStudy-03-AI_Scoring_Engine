@@ -6,13 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pdfplumber
-from bs4 import BeautifulSoup
-from bs4 import XMLParsedAsHTMLWarning
-import warnings
-
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-
 SECTION_PATTERNS = {
     "item_1": r"(?is)\bITEM\s*1[.\s]*BUSINESS\b",
     "item_1a": r"(?is)\bITEM\s*1A[.\s]*RISK\s*FACTORS\b",
@@ -49,6 +42,13 @@ def sha256_text(text: str) -> str:
 
 
 def _parse_html_bytes(b: bytes) -> str:
+    import warnings
+    try:
+        from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("BeautifulSoup dependency missing. Install 'beautifulsoup4' and 'lxml'.") from exc
+
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
     soup = BeautifulSoup(b, "lxml")
     # remove scripts/styles/nav noise
     for tag in soup(["script", "style", "noscript"]):
@@ -61,6 +61,10 @@ def _parse_html_bytes(b: bytes) -> str:
 def _parse_pdf_bytes(b: bytes) -> str:
     # pdfplumber expects a file-like object; easiest is to write temp or use BytesIO
     from io import BytesIO
+    try:
+        import pdfplumber
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("PDF parser dependency missing. Install 'pdfplumber'.") from exc
 
     text_parts: List[str] = []
     with pdfplumber.open(BytesIO(b)) as pdf:

@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS industries (
 CREATE TABLE IF NOT EXISTS companies (
     id STRING PRIMARY KEY,
     name STRING NOT NULL,
-    ticker STRING,
+    ticker STRING UNIQUE,
     industry_id STRING,
     position_factor NUMBER(4,3) DEFAULT 0.0,
     is_deleted BOOLEAN DEFAULT FALSE,
@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS documents (
   status STRING DEFAULT 'pending',  
   error_message STRING,
   created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
-  processed_at TIMESTAMP_NTZ
+  processed_at TIMESTAMP_NTZ,
+  CONSTRAINT uq_documents_content_hash UNIQUE (content_hash)
 );
  
 CREATE TABLE IF NOT EXISTS document_chunks (
@@ -136,6 +137,7 @@ CREATE TABLE IF NOT EXISTS company_signal_summaries (
  
   summary_text STRING NOT NULL,
   signal_count INT DEFAULT 0,
-  created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+  created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+  CONSTRAINT uq_company_signal_summary_company_day UNIQUE (company_id, as_of_date)
 );
 

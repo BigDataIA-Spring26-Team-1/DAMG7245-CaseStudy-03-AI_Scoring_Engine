@@ -1,8 +1,27 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from app.services.snowflake import get_snowflake_connection
+
+logger = logging.getLogger("uvicorn.error")
+
+
+def _apply_uniqueness_constraints(cur) -> None:
+    # Best-effort for existing environments created before constraints were added.
+    constraints = [
+        "ALTER TABLE companies ADD CONSTRAINT uq_companies_ticker UNIQUE (ticker)",
+        "ALTER TABLE documents ADD CONSTRAINT uq_documents_content_hash UNIQUE (content_hash)",
+        "ALTER TABLE company_signal_summaries ADD CONSTRAINT uq_company_signal_summary_company_day UNIQUE (company_id, as_of_date)",
+    ]
+    for stmt in constraints:
+        try:
+            cur.execute(stmt)
+        except Exception as exc:
+            # Already exists / duplicates present; leave as-is to avoid breaking schema apply.
+            logger.warning("schema_constraint_apply_skipped stmt=%s err=%s", stmt, exc)
+            continue
 
 
 def _split_sql_statements(sql: str) -> list[str]:
@@ -29,6 +48,7 @@ def apply_schema() -> None:
     try:
         for stmt in statements:
             cur.execute(stmt)
+        _apply_uniqueness_constraints(cur)
     finally:
         cur.close()
         conn.close()

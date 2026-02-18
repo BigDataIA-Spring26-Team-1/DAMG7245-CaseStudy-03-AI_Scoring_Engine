@@ -23,16 +23,6 @@ DEFAULT_DIMENSION_WEIGHTS: dict[DimensionName, float] = {
     DimensionName.culture_change: 0.05,
 }
 
-DEFAULT_DIMENSION_WEIGHTS: dict[DimensionName, float] = {
-    DimensionName.data_infrastructure: 0.14,
-    DimensionName.ai_governance: 0.14,
-    DimensionName.technology_stack: 0.14,
-    DimensionName.talent_skills: 0.14,
-    DimensionName.leadership_vision: 0.14,
-    DimensionName.use_case_portfolio: 0.15,
-    DimensionName.culture_change: 0.15,
-}
-
 
 class DimensionScoreCreate(BaseModel):
     assessment_id: UUID

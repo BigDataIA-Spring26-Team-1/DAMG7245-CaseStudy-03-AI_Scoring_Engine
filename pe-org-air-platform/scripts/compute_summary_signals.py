@@ -111,8 +111,7 @@ def main() -> int:
                 ON t.company_id = s.company_id AND t.ticker = s.ticker AND t.as_of_date = s.as_of_date
                 WHEN MATCHED THEN UPDATE SET
                   summary_text = %s,
-                  signal_count = %s,
-                  created_at = CURRENT_TIMESTAMP()
+                  signal_count = %s
                 WHEN NOT MATCHED THEN INSERT
                   (id, company_id, ticker, as_of_date, summary_text, signal_count, created_at)
                 VALUES

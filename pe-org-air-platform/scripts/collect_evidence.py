@@ -35,11 +35,22 @@ def get_company_id_for_ticker(ticker: str) -> str:
     conn = get_snowflake_connection()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT id FROM companies WHERE ticker = %s LIMIT 1", (ticker,))
-        row = cur.fetchone()
-        if not row:
+        cur.execute(
+            """
+            SELECT id
+            FROM companies
+            WHERE ticker = %s AND is_deleted = FALSE
+            ORDER BY created_at DESC
+            LIMIT 2
+            """,
+            (ticker,),
+        )
+        rows = cur.fetchall()
+        if not rows:
             raise RuntimeError(f"Company not found in companies table for ticker={ticker}. Run backfill_companies.py")
-        return str(row[0])
+        if len(rows) > 1:
+            raise RuntimeError(f"Duplicate active company rows found for ticker={ticker}")
+        return str(rows[0][0])
     finally:
         cur.close()
         conn.close()
@@ -162,10 +173,17 @@ def main() -> int:
                 except Exception as e:
                     # Record failure in documents registry (grade-friendly)
                     err = str(e)[:8000]
+                    status_updated = False
                     try:
                         # if doc was inserted, just update status; else insert a failed stub
-                        store.update_document_status(doc_id, DocumentStatus.FAILED.value, error_message=err)
+                        status_updated = store.update_document_status(
+                            doc_id,
+                            DocumentStatus.FAILED.value,
+                            error_message=err,
+                        )
                     except Exception:
+                        status_updated = False
+                    if not status_updated:
                         store.insert_failed_stub(
                             doc_id=doc_id,
                             company_id=company_id,

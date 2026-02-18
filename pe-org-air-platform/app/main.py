@@ -11,6 +11,8 @@ from app.routers.assessments import router as assessments_router
 from app.routers.documents import router as documents_router
 from app.routers.signals import router as signals_router
 from app.routers.evidence import router as evidence_router
+from app.routers.collection import router as collection_router
+from app.routers.signal_summaries import router as signal_summaries_router
 from app.routers import chunk
  
  
@@ -27,9 +29,6 @@ app.include_router(assessments_router, prefix=settings.api_prefix, tags=["assess
 app.include_router(documents_router, prefix=settings.api_prefix, tags=["documents"])
 app.include_router(signals_router, prefix=settings.api_prefix, tags=["signals"])
 app.include_router(evidence_router, prefix=settings.api_prefix, tags=["evidence"])
-
-app.include_router(chunk.router, prefix=settings.api_prefix, tags=["chunks"])
-app.include_router(chunk.router, prefix=settings.api_prefix, tags=["chunks"])
-app.include_router(chunk.router, prefix=settings.api_prefix, tags=["chunks"])
-
+app.include_router(collection_router, prefix=settings.api_prefix, tags=["collection"])
+app.include_router(signal_summaries_router, prefix=settings.api_prefix, tags=["signal-summaries"])
 app.include_router(chunk.router, prefix=settings.api_prefix, tags=["chunks"])

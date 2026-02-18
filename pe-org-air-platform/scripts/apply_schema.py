@@ -25,6 +25,24 @@ def strip_leading_line_comments(sql: str) -> str:
     while i < len(lines) and lines[i].lstrip().startswith("--"):
         i += 1
     return "\n".join(lines[i:]).strip()
+
+
+def apply_uniqueness_constraints(cur) -> int:
+    # Best-effort for environments that already had these tables.
+    constraints = [
+        "ALTER TABLE companies ADD CONSTRAINT uq_companies_ticker UNIQUE (ticker)",
+        "ALTER TABLE documents ADD CONSTRAINT uq_documents_content_hash UNIQUE (content_hash)",
+        "ALTER TABLE company_signal_summaries ADD CONSTRAINT uq_company_signal_summary_company_day UNIQUE (company_id, as_of_date)",
+    ]
+    applied = 0
+    for stmt in constraints:
+        try:
+            cur.execute(stmt)
+            applied += 1
+        except Exception:
+            # Ignore if already present or blocked by historical duplicate rows.
+            continue
+    return applied
  
  
 def main() -> int:
@@ -49,7 +67,11 @@ def main() -> int:
             except Exception:
                 print(f"\n Failed on statement #{i}:\n{s}\n")
                 raise
- 
+
+        constraints_applied = apply_uniqueness_constraints(cur)
+        if constraints_applied:
+            print(f"Applied {constraints_applied} uniqueness constraint statement(s)")
+
         print(f"Applied {applied} SQL statements from {schema_path}")
         return 0
     finally:

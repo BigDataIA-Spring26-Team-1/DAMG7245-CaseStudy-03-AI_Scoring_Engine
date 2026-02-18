@@ -84,7 +84,7 @@ def test_create_company_invalid_industry(client, fake_sf):
 def test_create_company_success(client, fake_sf):
     payload = {"name": "Test Co", "ticker": "TCO", "industry_id": INDUSTRY_ID, "position_factor": 0.25}
     row = (COMPANY_ID, "Test Co", "TCO", INDUSTRY_ID, 0.25, False, datetime.now(), datetime.now())
-    fake_sf._one_queue = [(1,), row]
+    fake_sf._one_queue = [(1,), None, row]
     r = client.post("/api/v1/companies", json=payload)
     assert r.status_code == 201
     body = r.json()
@@ -132,7 +132,7 @@ def test_update_company_no_fields(client, fake_sf):
 
 def test_update_company_with_fields(client, fake_sf):
     row = (COMPANY_ID, "Updated Co", "UCO", INDUSTRY_ID, 0.3, False, datetime.now(), datetime.now())
-    fake_sf._one_queue = [(1,), row]
+    fake_sf._one_queue = [(1,), None, row]
     r = client.put(f"/api/v1/companies/{COMPANY_ID}", json={"name": "Updated Co", "ticker": "UCO", "position_factor": 0.3})
     assert r.status_code == 200
     assert r.json()["name"] == "Updated Co"
@@ -285,3 +285,131 @@ def test_upsert_dimension_score_validation_error(client, fake_sf):
     payload = {"assessment_id": ASSESSMENT_ID, "dimension": "ai_governance", "score": 120, "weight": 0.6, "confidence": 0.9, "evidence_count": 2}
     r = client.post(f"/api/v1/assessments/{ASSESSMENT_ID}/scores", json=payload)
     assert r.status_code == 422
+
+
+def test_create_company_duplicate_ticker_returns_409(client, fake_sf):
+    payload = {"name": "Dup Co", "ticker": "TCO", "industry_id": INDUSTRY_ID, "position_factor": 0.25}
+    fake_sf._one_queue = [(1,), ("existing-id",)]
+    r = client.post("/api/v1/companies", json=payload)
+    assert r.status_code == 409
+
+
+def test_update_company_duplicate_ticker_returns_409(client, fake_sf):
+    fake_sf._one_queue = [(1,), (1,), (COMPANY_ID, "X", "XXX", INDUSTRY_ID, 0.2, False, datetime.now(), datetime.now())]
+    r = client.put(f"/api/v1/companies/{COMPANY_ID}", json={"ticker": "DUP"})
+    assert r.status_code == 409
+
+
+def test_update_assessment_status_invalid_transition_returns_400(client, fake_sf):
+    fake_sf._one_queue = [("draft",)]
+    r = client.patch(f"/api/v1/assessments/{ASSESSMENT_ID}/status", json={"status": "approved"})
+    assert r.status_code == 400
+    assert "Invalid status transition" in r.json()["detail"]
+
+
+def test_documents_list_accepts_offset(monkeypatch, client):
+    seen = {}
+
+    class _Store:
+        def list_documents(self, ticker=None, company_id=None, limit=200, offset=0):
+            seen["offset"] = offset
+            seen["limit"] = limit
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("app.routers.documents.EvidenceStore", lambda: _Store())
+    r = client.get("/api/v1/documents?limit=10&offset=7")
+    assert r.status_code == 200
+    assert seen["limit"] == 10
+    assert seen["offset"] == 7
+
+
+def test_evidence_documents_alias_accepts_offset(monkeypatch, client):
+    seen = {}
+
+    def _list_documents_from_documents_router(ticker=None, company_id=None, limit=100, offset=0):
+        seen["offset"] = offset
+        return []
+
+    monkeypatch.setattr(
+        "app.routers.evidence.list_documents_from_documents_router",
+        _list_documents_from_documents_router,
+    )
+    r = client.get("/api/v1/evidence/documents?offset=5")
+    assert r.status_code == 200
+    assert seen["offset"] == 5
+
+
+def test_collection_rejects_empty_ticker_input(client):
+    r = client.post("/api/v1/collection/evidence?companies=   ")
+    assert r.status_code == 422
+    assert r.json()["detail"] == "No valid tickers provided"
+
+
+def test_collection_rejects_invalid_ticker_format(client):
+    r = client.post("/api/v1/collection/signals?companies=CAT,!!")
+    assert r.status_code == 422
+    assert "Invalid ticker format" in r.json()["detail"]
+
+
+def test_collection_queue_and_task_status(client, monkeypatch):
+    monkeypatch.setattr("app.routers.collection.run_collect_evidence", lambda _task_id, _tickers: None)
+    r = client.post("/api/v1/collection/evidence?companies=CAT")
+    assert r.status_code == 200
+    task_id = r.json()["task_id"]
+
+    s = client.get(f"/api/v1/collection/tasks/{task_id}")
+    assert s.status_code == 200
+    body = s.json()
+    assert body["status"] == "queued"
+    assert body["type"] == "evidence"
+
+
+def test_signals_list_endpoint(client, fake_sf):
+    fake_sf.description = [
+        ("ID",),
+        ("COMPANY_ID",),
+        ("TICKER",),
+        ("SIGNAL_TYPE",),
+        ("SOURCE",),
+        ("TITLE",),
+        ("URL",),
+        ("PUBLISHED_AT",),
+        ("COLLECTED_AT",),
+        ("CONTENT_HASH",),
+        ("METADATA",),
+    ]
+    fake_sf._all = [("sig-1", COMPANY_ID, "CAT", "news", "google_news_rss", "title", "url", None, datetime.now(), "h", {})]
+    r = client.get("/api/v1/signals?ticker=CAT")
+    assert r.status_code == 200
+    assert r.json()[0]["ticker"] == "CAT"
+
+
+def test_get_signal_not_found(client, fake_sf):
+    fake_sf._one = None
+    r = client.get("/api/v1/signals/sig-missing")
+    assert r.status_code == 404
+
+
+def test_signal_summaries_list_endpoint(client, fake_sf):
+    fake_sf.description = [
+        ("ID",),
+        ("COMPANY_ID",),
+        ("TICKER",),
+        ("AS_OF_DATE",),
+        ("SUMMARY_TEXT",),
+        ("SIGNAL_COUNT",),
+        ("CREATED_AT",),
+    ]
+    fake_sf._all = [("sum-1", COMPANY_ID, "CAT", str(date.today()), "summary", 5, datetime.now())]
+    r = client.get("/api/v1/signal-summaries?ticker=CAT")
+    assert r.status_code == 200
+    assert r.json()[0]["ticker"] == "CAT"
+
+
+def test_signal_summaries_compute_duplicate_companies_returns_409(client, fake_sf):
+    fake_sf._all_queue = [[("id-1",), ("id-2",)]]
+    r = client.post("/api/v1/signal-summaries/compute?ticker=CAT")
+    assert r.status_code == 409

@@ -32,20 +32,30 @@ def _to_jsonable(payload: Any) -> Any:
 
 
 def cache_get_json(key: str) -> Optional[Any]:
-    r = get_redis_client()
-    val = r.get(key)
-    if not val:
-        logger.info("cache_miss key=%s", key)
+    try:
+        r = get_redis_client()
+        val = r.get(key)
+        if not val:
+            logger.info("cache_miss key=%s", key)
+            return None
+        logger.info("cache_hit key=%s", key)
+        return json.loads(val)
+    except Exception as exc:
+        logger.warning("cache_get_failed key=%s err=%s", key, exc)
         return None
-    logger.info("cache_hit key=%s", key)
-    return json.loads(val)
 
 
 def cache_set_json(key: str, payload: Any, ttl_seconds: int) -> None:
-    r = get_redis_client()
-    r.setex(key, ttl_seconds, json.dumps(_to_jsonable(payload), default=str))
+    try:
+        r = get_redis_client()
+        r.setex(key, ttl_seconds, json.dumps(_to_jsonable(payload), default=str))
+    except Exception as exc:
+        logger.warning("cache_set_failed key=%s err=%s", key, exc)
 
 
 def cache_delete(key: str) -> None:
-    r = get_redis_client()
-    r.delete(key)
+    try:
+        r = get_redis_client()
+        r.delete(key)
+    except Exception as exc:
+        logger.warning("cache_delete_failed key=%s err=%s", key, exc)

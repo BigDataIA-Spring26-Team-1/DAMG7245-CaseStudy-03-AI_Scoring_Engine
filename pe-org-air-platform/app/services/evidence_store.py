@@ -98,7 +98,7 @@ class EvidenceStore:
 
     def update_document_status(
         self, document_id: str, status: str, error_message: str | None = None
-    ) -> None:
+    ) -> bool:
         q = """
         UPDATE documents
            SET status=%s,
@@ -109,6 +109,15 @@ class EvidenceStore:
         cur = self.conn.cursor()
         try:
             cur.execute(q, (status, error_message, status, document_id))
+            affected = getattr(cur, "rowcount", None)
+            if isinstance(affected, int):
+                if affected > 0:
+                    return True
+                if affected == 0:
+                    return False
+
+            cur.execute("SELECT 1 FROM documents WHERE id=%s LIMIT 1", (document_id,))
+            return cur.fetchone() is not None
         finally:
             cur.close()
 

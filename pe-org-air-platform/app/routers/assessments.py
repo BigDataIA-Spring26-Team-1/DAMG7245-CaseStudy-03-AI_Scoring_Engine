@@ -1,7 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, status
-from typing import List
 from uuid import UUID, uuid4
-from datetime import datetime
 
 from app.models.assessment import (
     AssessmentCreate,
@@ -12,13 +10,36 @@ from app.models.assessment import (
 from app.models.dimension import (
     DimensionScoreCreate,
     DimensionScoreOut,
-    DimensionScoreUpdate,
 )
 from app.models.pagination import Page
 from app.services.snowflake import get_snowflake_connection
 from app.services.redis_cache import cache_get_json, cache_set_json, cache_delete
 
 router = APIRouter(tags=["assessments"])
+
+ALLOWED_STATUS_TRANSITIONS: dict[AssessmentStatus, set[AssessmentStatus]] = {
+    AssessmentStatus.draft: {AssessmentStatus.in_progress, AssessmentStatus.submitted, AssessmentStatus.superseded},
+    AssessmentStatus.in_progress: {AssessmentStatus.submitted, AssessmentStatus.superseded},
+    AssessmentStatus.submitted: {AssessmentStatus.approved, AssessmentStatus.superseded},
+    AssessmentStatus.approved: {AssessmentStatus.superseded},
+    AssessmentStatus.superseded: set(),
+}
+
+
+def _row_to_assessment_out(row: tuple) -> AssessmentOut:
+    return AssessmentOut(
+        id=UUID(row[0]),
+        company_id=UUID(row[1]),
+        assessment_type=row[2],
+        assessment_date=row[3],
+        status=row[4],
+        primary_assessor=row[5],
+        secondary_assessor=row[6],
+        vr_score=float(row[7]) if row[7] is not None else None,
+        confidence_lower=float(row[8]) if row[8] is not None else None,
+        confidence_upper=float(row[9]) if row[9] is not None else None,
+        created_at=row[10],
+    )
 
 
 @router.post("/assessments", response_model=AssessmentOut, status_code=status.HTTP_201_CREATED)
@@ -54,20 +75,18 @@ def create_assessment(assessment: AssessmentCreate):
             ),
         )
 
-        # Return created object
-        return AssessmentOut(
-            id=UUID(new_id),
-            company_id=assessment.company_id,
-            assessment_type=assessment.assessment_type,
-            assessment_date=assessment.assessment_date,
-            status=AssessmentStatus.draft,
-            primary_assessor=assessment.primary_assessor,
-            secondary_assessor=assessment.secondary_assessor,
-            vr_score=assessment.vr_score,
-            confidence_lower=assessment.confidence_lower,
-            confidence_upper=assessment.confidence_upper,
-            created_at=datetime.now(),
+        cur.execute(
+            """
+            SELECT id, company_id, assessment_type, assessment_date, status,
+                   primary_assessor, secondary_assessor, vr_score, 
+                   confidence_lower, confidence_upper, created_at
+            FROM assessments
+            WHERE id = %s
+            """,
+            (new_id,),
         )
+        row = cur.fetchone()
+        return _row_to_assessment_out(row)
     finally:
         cur.close()
         conn.close()
@@ -111,21 +130,7 @@ def list_assessments(
 
         items = []
         for row in rows:
-            items.append(
-                AssessmentOut(
-                    id=UUID(row[0]),
-                    company_id=UUID(row[1]),
-                    assessment_type=row[2],
-                    assessment_date=row[3],
-                    status=row[4],
-                    primary_assessor=row[5],
-                    secondary_assessor=row[6],
-                    vr_score=float(row[7]) if row[7] is not None else None,
-                    confidence_lower=float(row[8]) if row[8] is not None else None,
-                    confidence_upper=float(row[9]) if row[9] is not None else None,
-                    created_at=row[10],
-                )
-            )
+            items.append(_row_to_assessment_out(row))
 
         return Page[AssessmentOut].create(items=items, total=total, page=page, page_size=page_size)
 
@@ -157,19 +162,7 @@ def get_assessment(id: UUID):
         if not row:
             raise HTTPException(status_code=404, detail="Assessment not found")
 
-        assessment = AssessmentOut(
-            id=UUID(row[0]),
-            company_id=UUID(row[1]),
-            assessment_type=row[2],
-            assessment_date=row[3],
-            status=row[4],
-            primary_assessor=row[5],
-            secondary_assessor=row[6],
-            vr_score=float(row[7]) if row[7] is not None else None,
-            confidence_lower=float(row[8]) if row[8] is not None else None,
-            confidence_upper=float(row[9]) if row[9] is not None else None,
-            created_at=row[10],
-        )
+        assessment = _row_to_assessment_out(row)
         cache_set_json(cache_key, assessment, ttl_seconds=120)
         return assessment
     finally:
@@ -188,11 +181,21 @@ def update_assessment_status(id: UUID, status_update: AssessmentStatusUpdate):
         if not row:
             raise HTTPException(status_code=404, detail="Assessment not found")
         current_status = AssessmentStatus(row[0])
+        target_status = status_update.status
 
-        cur.execute(
-            "UPDATE assessments SET status = %s WHERE id = %s",
-            (status_update.status.value, str(id)),
-        )
+        if target_status != current_status and target_status not in ALLOWED_STATUS_TRANSITIONS[current_status]:
+            allowed = ", ".join(sorted(s.value for s in ALLOWED_STATUS_TRANSITIONS[current_status])) or "none"
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status transition from '{current_status.value}' to '{target_status.value}'. "
+                f"Allowed next statuses: {allowed}",
+            )
+
+        if target_status != current_status:
+            cur.execute(
+                "UPDATE assessments SET status = %s WHERE id = %s",
+                (target_status.value, str(id)),
+            )
         
         # Invalidate cache
         cache_delete(f"assessment:{id}")

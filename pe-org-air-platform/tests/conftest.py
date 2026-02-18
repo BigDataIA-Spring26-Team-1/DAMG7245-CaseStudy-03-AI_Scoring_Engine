@@ -36,6 +36,8 @@ def mock_redis(monkeypatch):
     monkeypatch.setattr("app.routers.assessments.cache_get_json", _get_json)
     monkeypatch.setattr("app.routers.assessments.cache_set_json", _set_json)
     monkeypatch.setattr("app.routers.assessments.cache_delete", _delete)
+    monkeypatch.setattr("app.routers.collection.cache_get_json", _get_json)
+    monkeypatch.setattr("app.routers.collection.cache_set_json", _set_json)
 
 
 # -----------------------------
@@ -49,9 +51,13 @@ class FakeCursor:
         self._all_queue = []
         self.queries = []
         self.rowcount = 1
+        self.description = []
+        self.execute_side_effect = None
 
     def execute(self, sql, params=None):
         self.queries.append((sql, params))
+        if callable(self.execute_side_effect):
+            self.execute_side_effect(sql, params)
         return self
 
     def fetchone(self):
@@ -93,4 +99,9 @@ def fake_sf(monkeypatch):
     # Routers import the function directly; patch their module references too.
     monkeypatch.setattr("app.routers.companies.get_snowflake_connection", lambda: conn)
     monkeypatch.setattr("app.routers.assessments.get_snowflake_connection", lambda: conn)
+    monkeypatch.setattr("app.routers.collection.get_snowflake_connection", lambda: conn)
+    monkeypatch.setattr("app.routers.signals.get_snowflake_connection", lambda: conn)
+    monkeypatch.setattr("app.routers.signal_summaries.get_snowflake_connection", lambda: conn)
+    monkeypatch.setattr("app.services.evidence_store.get_snowflake_connection", lambda: conn)
+    monkeypatch.setattr("app.services.signal_store.get_snowflake_connection", lambda: conn)
     return cursor

@@ -464,7 +464,7 @@ def main() -> int:
         update_scoring_run_status(cur, run_id, "success")
         conn.commit()
 
-        print("✅ Scoring run completed")
+        print("Scoring run completed")
         print(f"run_id: {run_id}")
         return 0
 

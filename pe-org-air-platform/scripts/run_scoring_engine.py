@@ -20,6 +20,7 @@ from app.scoring_engine.hr_baselines import compute_hr_factor, apply_hr_adjustme
 from app.scoring_engine.synergy import load_synergy_rules, compute_synergy
 from app.scoring_engine.talent_penalty import compute_talent_penalty
 from app.scoring_engine.composite import compute_composite
+from app.scoring_engine.sem_confidence import compute_sem_confidence  
 
 
 def _now_ts() -> str:
@@ -124,9 +125,6 @@ def upsert_org_air_score(
 ) -> None:
     """
     Idempotent upsert for (company_id, scoring_run_id).
-
-    NOTE: Keep JSON parsing inside MERGE as PARSE_JSON(%s). If your Snowflake environment
-    complains here, we can refactor to a USING subquery that pre-parses JSON.
     """
     score_id = str(uuid4())
     cur.execute(
@@ -284,11 +282,29 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         {"vr_score": vr, "dimension_breakdown": vr_breakdown},
     )
 
-    # Composite (SEM not implemented yet => sem bounds NULL for now)
+    # Composite
     comp = compute_composite(
         vr_score=vr,
         synergy_bonus=syn.synergy_bonus,
         penalty_factor=pen.penalty_factor,
+    )
+
+    # ✅ SEM confidence intervals (or bootstrap fallback)
+    sem = compute_sem_confidence(
+        cur,
+        company_id=company_id,
+        assessment_id=assessment_id,
+        composite_score=comp.composite_score,
+        version=version,
+    )
+
+    audit_log(
+        cur,
+        run_id,
+        company_id,
+        "sem",
+        {"company_id": company_id, "assessment_id": assessment_id, "composite_score": comp.composite_score},
+        sem,
     )
 
     breakdown_json = {
@@ -335,6 +351,7 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
             "composite_score": comp.composite_score,
             "score_band": comp.score_band,
         },
+        "sem": sem,  # ✅ NEW
         "generated_at_utc": _now_ts(),
     }
 
@@ -349,8 +366,8 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         vr_score=vr,
         synergy_bonus=syn.synergy_bonus,
         talent_penalty=penalty_magnitude,
-        sem_lower=None,
-        sem_upper=None,
+        sem_lower=sem.get("lower"),
+        sem_upper=sem.get("upper"),
         composite_score=comp.composite_score,
         score_band=comp.score_band,
         breakdown_json=breakdown_json,

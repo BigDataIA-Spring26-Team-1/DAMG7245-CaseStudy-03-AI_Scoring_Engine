@@ -14,6 +14,8 @@ from app.routers.evidence import router as evidence_router
 from app.routers.collection import router as collection_router
 from app.routers.signal_summaries import router as signal_summaries_router
 from app.routers import chunk
+from app.routers.scoring import router as scoring_router
+
  
  
 app = FastAPI(title=settings.app_name)
@@ -32,3 +34,6 @@ app.include_router(evidence_router, prefix=settings.api_prefix, tags=["evidence"
 app.include_router(collection_router, prefix=settings.api_prefix, tags=["collection"])
 app.include_router(signal_summaries_router, prefix=settings.api_prefix, tags=["signal-summaries"])
 app.include_router(chunk.router, prefix=settings.api_prefix, tags=["chunks"])
+
+# Scoring endpoints
+app.include_router(scoring_router, prefix=settings.api_prefix, tags=["scoring"])

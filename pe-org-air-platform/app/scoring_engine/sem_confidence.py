@@ -259,3 +259,109 @@ def _bootstrap_ci(
 
     fit = {"rmse": round(float(np.mean(sigmas)), 4)}
     return results, fit
+
+
+def _fetch_dimension_vector(cur, assessment_id: str) -> list[float]:
+    cur.execute(
+        """
+        SELECT dimension, score
+        FROM dimension_scores
+        WHERE assessment_id = %s
+        """,
+        (assessment_id,),
+    )
+    rows = cur.fetchall() or []
+    by_dim = {str(dim): float(score) for dim, score in rows}
+    return [float(by_dim.get(dim, 0.0)) for dim in DIMENSIONS]
+
+
+def _fetch_training_rows(cur, company_id: str, version: str, limit: int = 50) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build training rows from recent scored runs in the same model/version family.
+    """
+    cur.execute(
+        """
+        SELECT
+          o.company_id,
+          o.assessment_id,
+          o.composite_score
+        FROM org_air_scores o
+        JOIN scoring_runs r
+          ON o.scoring_run_id = r.id
+        WHERE r.model_version LIKE %s
+          AND o.composite_score IS NOT NULL
+          AND o.company_id != %s
+        ORDER BY o.scored_at DESC
+        LIMIT %s
+        """,
+        (f"{version}%", company_id, limit),
+    )
+
+    X_rows: list[list[float]] = []
+    y_vals: list[float] = []
+
+    for _cid, assessment_id, composite_score in cur.fetchall() or []:
+        if not assessment_id:
+            continue
+        vec = _fetch_dimension_vector(cur, str(assessment_id))
+        X_rows.append(vec)
+        y_vals.append(float(composite_score))
+
+    if not X_rows:
+        return np.empty((0, len(DIMENSIONS))), np.empty((0,))
+
+    return np.array(X_rows, dtype=float), np.array(y_vals, dtype=float)
+
+
+def compute_sem_confidence(
+    cur,
+    *,
+    company_id: str,
+    assessment_id: str,
+    composite_score: float,
+    version: str,
+    bootstrap_samples: int = 400,
+) -> dict:
+    """
+    Return SEM confidence details for one company score.
+
+    Falls back to a deterministic +/-5 interval when there is insufficient
+    historical training data for SEM/bootstrap fitting.
+    """
+    current_vec = _fetch_dimension_vector(cur, assessment_id)
+    X_hist, y_hist = _fetch_training_rows(cur, company_id=company_id, version=version, limit=50)
+
+    # Include current row as last item so we can read back one-company result.
+    x_curr = np.array([current_vec], dtype=float)
+    y_curr = np.array([float(composite_score)], dtype=float)
+
+    if X_hist.size == 0:
+        lower = round(_clamp(float(composite_score) - 5.0, 0.0, 100.0), 2)
+        upper = round(_clamp(float(composite_score) + 5.0, 0.0, 100.0), 2)
+        return {
+            "lower": lower,
+            "upper": upper,
+            "standard_error": 5.0,
+            "method_used": "fallback_constant_band",
+            "model_fit_index": {},
+            "global_fit": {},
+        }
+
+    X = np.vstack([X_hist, x_curr])
+    y = np.concatenate([y_hist, y_curr])
+
+    results, fit = compute_sem_confidence_intervals(
+        X=X,
+        y=y,
+        bootstrap_samples=bootstrap_samples,
+    )
+    r = results[-1]
+
+    return {
+        "lower": r.lower,
+        "upper": r.upper,
+        "standard_error": r.standard_error,
+        "method_used": r.method_used,
+        "model_fit_index": r.model_fit_index,
+        "global_fit": fit,
+    }

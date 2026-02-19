@@ -77,6 +77,7 @@ def compute_vr_score(
 
         breakdown.append(
             {
+                "dimension": d.dimension,
                 "raw_score": clamp(d.raw_score, 0.0, 100.0),
                 "confidence": c,
                 "confidence_used": c_eff,

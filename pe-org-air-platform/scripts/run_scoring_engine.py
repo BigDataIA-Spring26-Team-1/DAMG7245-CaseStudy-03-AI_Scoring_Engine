@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from email import parser
 import json
 import sys
 from pathlib import Path
@@ -365,27 +366,83 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         {"status": "upserted", "composite_score": comp.composite_score, "score_band": comp.score_band},
     )
 
+def get_company_ids(cur, tickers: list[str] | None = None) -> list[str]:
+    """
+    Returns company IDs that are eligible for scoring (i.e., have at least one assessment).
+    If tickers provided, filter by ticker.
+    """
+    if tickers:
+        placeholders = ", ".join(["%s"] * len(tickers))
+        query = f"""
+            SELECT DISTINCT c.id
+            FROM companies c
+            JOIN assessments a ON a.company_id = c.id
+            WHERE c.is_deleted = FALSE
+              AND UPPER(c.ticker) IN ({placeholders})
+        """
+        cur.execute(query, tuple([t.upper() for t in tickers]))
+    else:
+        cur.execute(
+            """
+            SELECT DISTINCT c.id
+            FROM companies c
+            JOIN assessments a ON a.company_id = c.id
+            WHERE c.is_deleted = FALSE
+            """
+        )
+ 
+    return [str(r[0]) for r in (cur.fetchall() or [])]
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--company-id", required=True)
+    parser.add_argument("--company-id", required=False)
+    parser.add_argument("--batch", action="store_true")
+    parser.add_argument("--tickers", help="Comma-separated tickers for batch scoring")
     parser.add_argument("--version", default="v1.0")
     parser.add_argument("--model-version", default="cs3-scoring-v1")
+    args = parser.parse_args()
     args = parser.parse_args()
 
     conn = get_snowflake_connection()
     cur = conn.cursor()
     run_id = None
 
+
+    if not args.batch and not args.company_id:
+        raise SystemExit("Provide --company-id or use --batch")
+ 
+    tickers = None
+    if args.tickers:
+        tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+    
+    if args.batch:
+        company_ids = get_company_ids(cur, tickers=tickers)
+    else:
+        company_ids = [args.company_id]
+    
+    if not company_ids:
+        raise SystemExit("No companies selected for scoring")
+
     try:
         run_id = insert_scoring_run(
             cur,
-            companies_scored=[args.company_id],
+            companies_scored=company_ids,
             model_version=args.model_version,
-            params={"version": args.version},
+            params={
+                "version": args.version,
+                "batch": args.batch,
+                "tickers": tickers,
+            },
         )
-
-        score_one_company(cur, company_id=args.company_id, version=args.version, run_id=run_id)
+        
+        for cid in company_ids:
+            score_one_company(
+                cur,
+                company_id=cid,
+                version=args.version,
+                run_id=run_id,
+            )
+        
 
         update_scoring_run_status(cur, run_id, "success")
         conn.commit()

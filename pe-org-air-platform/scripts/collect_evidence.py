@@ -15,6 +15,7 @@ from app.config import settings
 from app.pipelines.sec_edgar import SecEdgarClient, store_raw_filing
 from app.pipelines.document_parser import parse_filing_bytes, chunk_document
 from app.services.evidence_store import EvidenceStore, DocumentRow, ChunkRow
+from app.services.s3_storage import is_s3_configured, upload_text
 from app.services.snowflake import get_snowflake_connection
  
  
@@ -54,6 +55,44 @@ def get_company_id_for_ticker(ticker: str) -> str:
     finally:
         cur.close()
         conn.close()
+
+
+def _normalize_prefix(prefix: str, default_prefix: str) -> str:
+    normalized = prefix.strip().strip("/\\").replace("\\", "/")
+    return normalized or default_prefix
+
+
+def _write_processed_artifacts(
+    base_dir: Path,
+    out_prefix: str,
+    ticker: str,
+    filing,
+    parsed,
+    chunks,
+    s3_enabled: bool,
+) -> None:
+    base_name = f"{filing.form}_{filing.filing_date}_{filing.accession}"
+    body_text = parsed.sections.get("Item 1A") or parsed.full_text[:20000]
+    chunks_text = "\n\n--- CHUNK ---\n\n".join([c.content[:1500] for c in chunks[:10]])
+
+    if s3_enabled:
+        key_prefix = f"{out_prefix}/{ticker}"
+        upload_text(body_text, f"{key_prefix}/{base_name}.txt")
+        upload_text(chunks_text, f"{key_prefix}/{base_name}_chunks.txt")
+        return
+
+    out_dir = base_dir / Path(out_prefix) / ticker
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{base_name}.txt").write_text(
+        body_text,
+        encoding="utf-8",
+        errors="ignore",
+    )
+    (out_dir / f"{base_name}_chunks.txt").write_text(
+        chunks_text,
+        encoding="utf-8",
+        errors="ignore",
+    )
  
  
 def main() -> int:
@@ -69,6 +108,8 @@ def main() -> int:
     base_dir = ROOT
     client = SecEdgarClient(user_agent=settings.sec_user_agent, rate_limit_per_sec=5.0)
     store = EvidenceStore()
+    s3_enabled = is_s3_configured()
+    out_prefix = _normalize_prefix(args.out, "data/processed")
  
     try:
         ticker_map = client.get_ticker_to_cik_map()
@@ -92,35 +133,43 @@ def main() -> int:
                 print(f"SKIP: No filings found for {ticker}")
                 continue
  
-            out_dir = base_dir / args.out / ticker
-            out_dir.mkdir(parents=True, exist_ok=True)
- 
             for f in filings:
                 # We want a stable doc_id even if we fail mid-way
                 doc_id = str(uuid4())
                 source_url = f"{f.filing_dir_url}/{f.primary_doc}"
-                raw_path = None
+                raw_ref = None
                 content_hash = None
  
                 try:
                     # Step 1: download
                     raw = client.download_primary_document(f)
-                    raw_path = store_raw_filing(base_dir, f, raw)
+                    raw_ref = store_raw_filing(base_dir, f, raw)
                     status = DocumentStatus.DOWNLOADED.value
  
                     # Step 2: parse
-                    parsed = parse_filing_bytes(raw, file_hint=str(raw_path))
+                    parsed = parse_filing_bytes(raw, file_hint=f.primary_doc)
                     content_hash = parsed.content_hash
                     status = DocumentStatus.PARSED.value
+
+                    # Step 3: chunk
+                    chunks = chunk_document(parsed)
+                    status = DocumentStatus.CHUNKED.value
+
+                    # Always write proof artifacts (local or S3), even if deduped in DB
+                    _write_processed_artifacts(
+                        base_dir=base_dir,
+                        out_prefix=out_prefix,
+                        ticker=ticker,
+                        filing=f,
+                        parsed=parsed,
+                        chunks=chunks,
+                        s3_enabled=s3_enabled,
+                    )
  
                     # Dedupe (by content hash) BEFORE inserting new doc
                     if store.document_exists_by_hash(content_hash):
                         print(f"SKIP: {ticker} {f.form} {f.filing_date} already processed (hash={content_hash[:10]})")
                         continue
- 
-                    # Step 3: chunk
-                    chunks = chunk_document(parsed)
-                    status = DocumentStatus.CHUNKED.value
  
                     # Insert document with latest status so far
                     doc_row = DocumentRow(
@@ -130,7 +179,7 @@ def main() -> int:
                         filing_type=f.form,
                         filing_date=f.filing_date,
                         source_url=source_url,
-                        local_path=str(raw_path),
+                        local_path=str(raw_ref) if raw_ref else None,
                         content_hash=content_hash,
                         word_count=parsed.word_count,
                         chunk_count=len(chunks),
@@ -158,18 +207,6 @@ def main() -> int:
                     store.update_document_status(doc_id, DocumentStatus.INDEXED.value)
                     print(f"STORED: {ticker} {f.form} {f.filing_date} doc_id={doc_id} chunks={len(chunk_rows)}")
  
-                    # Proof artifacts
-                    (out_dir / f"{f.form}_{f.filing_date}_{f.accession}.txt").write_text(
-                        parsed.sections.get("Item 1A") or parsed.full_text[:20000],
-                        encoding="utf-8",
-                        errors="ignore",
-                    )
-                    (out_dir / f"{f.form}_{f.filing_date}_{f.accession}_chunks.txt").write_text(
-                        "\n\n--- CHUNK ---\n\n".join([c.content[:1500] for c in chunks[:10]]),
-                        encoding="utf-8",
-                        errors="ignore",
-                    )
- 
                 except Exception as e:
                     # Record failure in documents registry (grade-friendly)
                     err = str(e)[:8000]
@@ -191,7 +228,7 @@ def main() -> int:
                             filing_type=f.form,
                             filing_date=f.filing_date,
                             source_url=source_url,
-                            local_path=str(raw_path) if raw_path else None,
+                            local_path=str(raw_ref) if raw_ref else None,
                             content_hash=content_hash,
                             error_message=err,
                         )

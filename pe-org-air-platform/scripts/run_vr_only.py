@@ -9,6 +9,9 @@ from app.services.snowflake import get_snowflake_connection
 from app.scoring_engine.sector_config import get_company_sector, load_sector_profile
 from app.scoring_engine.vr_model import fetch_dimension_inputs, compute_vr_score
 from app.scoring_engine.hr_baselines import compute_hr_factor, apply_hr_adjustment_to_talent
+from app.scoring_engine.synergy import load_synergy_rules, compute_synergy
+from app.scoring_engine.talent_penalty import compute_talent_penalty
+
 def get_latest_assessment_id(cur, company_id: str) -> str:
     cur.execute(
         """
@@ -54,6 +57,21 @@ def main() -> int:
                     evidence_count=d.evidence_count,
                 )
             )
+
+        
+        scores_by_dim = {d.dimension: d.raw_score for d in adjusted_dims}
+
+        rules = load_synergy_rules(cur, version=args.version)
+        syn = compute_synergy(scores_by_dim, rules, cap_abs=15.0)
+
+        print("\n---- Synergy ----")
+        print(f"synergy_bonus: {syn.synergy_bonus:.2f} (cap=±{syn.cap:.1f})")
+        for h in syn.hits:
+            if h.activated:
+                print(f"✅ {h.dim_a} x {h.dim_b} [{h.synergy_type}] {h.magnitude:+.2f} ({h.reason})")
+
+        pen = compute_talent_penalty(cur, company_id=args.company_id, version=args.version)
+
         vr, breakdown = compute_vr_score(adjusted_dims, profile.weights)
         print("\n==== VR RESULT ====")
         print(f"company_id:    {args.company_id}")
@@ -67,7 +85,13 @@ def main() -> int:
         print(f"hr_factor:        {hr.hr_factor:.3f}")
         print(f"method:           {hr.method}")
         print(f"window_days:      {hr.window_days}")
+        print(f"rules_loaded: {len(rules)}")
         print("\n---- Dimension Breakdown ----")
+        print("\n---- Talent Concentration Penalty (HHI) ----")
+        print(f"sample_size:     {pen.sample_size} (min_met={pen.min_sample_met})")
+        print(f"hhi_value:       {pen.hhi_value:.3f}")
+        print(f"penalty_factor:  {pen.penalty_factor:.3f}")
+        print(f"function_counts: {pen.function_counts}")
         # Keep it readable in terminal:
         for b, d in zip(breakdown, dims):
             print(

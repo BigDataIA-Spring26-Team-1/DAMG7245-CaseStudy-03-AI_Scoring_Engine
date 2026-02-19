@@ -75,6 +75,7 @@ def upsert_company(cur, ticker: str, name: str, industry_id: str) -> str:
             UPDATE companies
                SET name = %s,
                    industry_id = %s,
+                   is_deleted = FALSE,
                    updated_at = CURRENT_TIMESTAMP()
              WHERE id = %s
             """,
@@ -133,6 +134,6 @@ def main() -> int:
         cur.close()
         conn.close()
 
-
+ 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -68,7 +68,10 @@ def test_list_recent_filings_filters_forms_and_limits_per_form():
         client.close()
 
 
-def test_safe_filename_and_store_raw_filing(tmp_path):
+def test_safe_filename_and_store_raw_filing(tmp_path, monkeypatch):
+    from app.pipelines import sec_edgar
+    monkeypatch.setattr(sec_edgar, "is_s3_configured", lambda: False)
+
     filing = FilingRef(
         ticker="CAT",
         cik="0001234567",

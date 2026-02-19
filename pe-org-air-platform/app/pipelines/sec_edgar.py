@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from app.services.s3_storage import is_s3_configured, upload_bytes
+
 
 SEC_WWW_BASE = "https://www.sec.gov"
 SEC_DATA_BASE = "https://data.sec.gov"
@@ -143,13 +145,18 @@ def store_raw_filing(
     base_dir: Path,
     filing: FilingRef,
     content: bytes,
-) -> Path:
+) -> Path | str:
     """
     Stores raw bytes under data/raw/<ticker>/<form>/<accession>_<primaryDoc>
     """
+    fname = safe_filename(f"{filing.accession}_{filing.primary_doc}")
+    key = f"data/raw/{filing.ticker}/{filing.form}/{fname}"
+
+    if is_s3_configured():
+        return upload_bytes(content, key, content_type="application/octet-stream")
+
     out_dir = base_dir / "data" / "raw" / filing.ticker / filing.form
     out_dir.mkdir(parents=True, exist_ok=True)
-    fname = safe_filename(f"{filing.accession}_{filing.primary_doc}")
     out_path = out_dir / fname
     out_path.write_bytes(content)
     return out_path

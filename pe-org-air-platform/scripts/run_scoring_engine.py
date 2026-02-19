@@ -1,3 +1,4 @@
+# scripts/run_scoring_engine.py
 from __future__ import annotations
 
 import argparse
@@ -123,6 +124,9 @@ def upsert_org_air_score(
 ) -> None:
     """
     Idempotent upsert for (company_id, scoring_run_id).
+
+    NOTE: Keep JSON parsing inside MERGE as PARSE_JSON(%s). If your Snowflake environment
+    complains here, we can refactor to a USING subquery that pre-parses JSON.
     """
     score_id = str(uuid4())
     cur.execute(
@@ -182,12 +186,14 @@ def upsert_org_air_score(
 def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> None:
     assessment_id = get_latest_assessment_id(cur, company_id)
 
+    # Sector profile (weights + sector name for auditability)
     sector = get_company_sector(cur, company_id)
     profile = load_sector_profile(cur, sector, version=version)
 
+    # Dimension inputs from Snowflake
     dims = fetch_dimension_inputs(cur, assessment_id)
 
-    # HR adjustment (talent only)
+    # HR adjustment (applies only to talent_skills)
     hr = compute_hr_factor(cur, company_id=company_id, sector_name=sector, version=version)
     adjusted_dims: list[DimensionInput] = []
     for d in dims:
@@ -248,7 +254,7 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         },
     )
 
-    # Talent penalty
+    # Talent penalty (HHI)
     pen = compute_talent_penalty(cur, company_id=company_id, version=version)
 
     audit_log(
@@ -278,7 +284,7 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         {"vr_score": vr, "dimension_breakdown": vr_breakdown},
     )
 
-    # Composite (SEM bounds filled later)
+    # Composite (SEM not implemented yet => sem bounds NULL for now)
     comp = compute_composite(
         vr_score=vr,
         synergy_bonus=syn.synergy_bonus,
@@ -332,6 +338,7 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         "generated_at_utc": _now_ts(),
     }
 
+    # Store penalty as "magnitude" (0.0 means no penalty)
     penalty_magnitude = float(1.0 - pen.penalty_factor)
 
     upsert_org_air_score(

@@ -1,31 +1,31 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
-
-
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
-
-
 @dataclass(frozen=True)
 class CompositeResult:
     composite_score: float
     score_band: str
-    base_vr_plus_synergy: float
-    penalty_factor_used: float
 
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
 
-def _score_band(score: float) -> str:
-    if score >= 85.0:
-        return "leader"
-    if score >= 70.0:
-        return "strong"
-    if score >= 55.0:
-        return "developing"
-    if score >= 40.0:
-        return "emerging"
-    return "lagging"
-
+def _assign_score_band(score: float) -> str:
+    """
+    Score bands defined in CS3 checklist:
+    0-20   Nascent
+    21-40  Developing
+    41-60  Progressing
+    61-80  Advanced
+    81-100 Leading
+    """
+    if score <= 20:
+        return "Nascent"
+    if score <= 40:
+        return "Developing"
+    if score <= 60:
+        return "Progressing"
+    if score <= 80:
+        return "Advanced"
+    return "Leading"
 
 def compute_composite(
     *,
@@ -34,19 +34,19 @@ def compute_composite(
     penalty_factor: float,
 ) -> CompositeResult:
     """
-    Composite score model:
-      1) Additive synergy on top of VR
-      2) Multiplicative talent concentration penalty
-      3) Clamp to [0, 100]
+    Composite formula (Lab 6):
+        Org-AI-R = (VR + synergy_bonus) * penalty_factor
+    - VR is already 0-100
+    - synergy_bonus is capped ±15
+    - penalty_factor in [0,1]
     """
-    base = _clamp(float(vr_score) + float(synergy_bonus), 0.0, 100.0)
-    factor = _clamp(float(penalty_factor), 0.0, 1.0)
-    composite = _clamp(base * factor, 0.0, 100.0)
-
+    base = vr_score + synergy_bonus
+    # ensure penalty_factor bounded
+    penalty_factor = _clamp(penalty_factor, 0.0, 1.0)
+    composite = base * penalty_factor
+    composite = _clamp(composite, 0.0, 100.0)
+    band = _assign_score_band(composite)
     return CompositeResult(
         composite_score=round(composite, 2),
-        score_band=_score_band(composite),
-        base_vr_plus_synergy=round(base, 2),
-        penalty_factor_used=round(factor, 4),
+        score_band=band,
     )
-

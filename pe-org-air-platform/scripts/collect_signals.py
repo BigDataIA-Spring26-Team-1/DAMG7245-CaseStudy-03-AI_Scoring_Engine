@@ -28,16 +28,11 @@ except Exception:  # pragma: no cover
  
  
 DEFAULT_COMPANIES: dict[str, str] = {
-    "CAT": "Caterpillar",
-    "DE": "Deere",
-    "UNH": "UnitedHealth",
-    "HCA": "HCA Healthcare",
-    "ADP": "ADP",
-    "PAYX": "Paychex",
-    "WMT": "Walmart",
-    "TGT": "Target",
+    "NVDA": "NVIDIA",
     "JPM": "JPMorgan",
-    "GS": "Goldman Sachs",
+    "WMT": "Walmart",
+    "GE": "General Electric",
+    "DG": "Dollar General",
 }
  
 # Optional job board tokens; leave blank to use RSS fallback.
@@ -426,3 +421,5 @@ def main() -> int:
  
 if __name__ == "__main__":
     raise SystemExit(main())
+ 
+ 

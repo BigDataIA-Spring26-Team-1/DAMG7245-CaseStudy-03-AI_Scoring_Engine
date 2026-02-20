@@ -1,29 +1,32 @@
 from __future__ import annotations
-
+ 
 import argparse
 import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
-
+ 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
+ 
 from app.config import settings
 from app.services.snowflake import get_snowflake_connection
 from app.services.s3_storage import is_s3_configured, upload_json, upload_text
 from app.services.signal_store import SignalStore
 from app.pipelines.external_signals import ExternalSignalCollector, sha256_text
-
+from app.pipelines.job_signals import normalize_job_rows, parse_jobs_rss, summarize_job_signals
+from app.pipelines.patent_signals import parse_patents_rss, summarize_patent_signals
+from app.pipelines.tech_signals import summarize_tech_signals
+ 
 # TechStackCollector is optional depending on your file.
 # We'll import if available and fallback gracefully if not.
 try:
     from app.pipelines.external_signals import TechStackCollector  # type: ignore
 except Exception:  # pragma: no cover
     TechStackCollector = None  # type: ignore
-
-
+ 
+ 
 DEFAULT_COMPANIES: dict[str, str] = {
     "CAT": "Caterpillar",
     "DE": "Deere",
@@ -36,11 +39,11 @@ DEFAULT_COMPANIES: dict[str, str] = {
     "JPM": "JPMorgan",
     "GS": "Goldman Sachs",
 }
-
+ 
 # Optional job board tokens; leave blank to use RSS fallback.
 JOB_BOARD_TOKENS: dict[str, dict[str, str]] = {t: {"greenhouse": "", "lever": ""} for t in DEFAULT_COMPANIES.keys()}
-
-
+ 
+ 
 def get_company_id(ticker: str) -> str:
     conn = get_snowflake_connection()
     cur = conn.cursor()
@@ -64,21 +67,21 @@ def get_company_id(ticker: str) -> str:
     finally:
         cur.close()
         conn.close()
-
-
+ 
+ 
 def _write_text(path: Path, text: str, limit: int = 20000) -> None:
     path.write_text((text or "")[:limit], encoding="utf-8", errors="ignore")
-
-
+ 
+ 
 def _write_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8", errors="ignore")
-
-
+ 
+ 
 def _normalize_prefix(prefix: str, default_prefix: str) -> str:
     normalized = prefix.strip().strip("/\\").replace("\\", "/")
     return normalized or default_prefix
-
-
+ 
+ 
 def _safe_get_patents_rss(collector: ExternalSignalCollector, query: str) -> Tuple[Optional[str], Optional[str], str]:
     """
     Returns (url, rss_text, source_label).
@@ -89,19 +92,19 @@ def _safe_get_patents_rss(collector: ExternalSignalCollector, query: str) -> Tup
         fn = getattr(collector, "patents_uspto_stub")
         url, rss = fn(query)
         return url, rss, "uspto_stub_rss"
-
+ 
     # If you implemented something like google_patents_rss(query)
     if hasattr(collector, "google_patents_rss"):
         fn = getattr(collector, "google_patents_rss")
         url, rss = fn(query)
         return url, rss, "google_patents_rss"
-
+ 
     # Fallback (still external)
     # This is not the USPTO API; this fallback keeps the pipeline end-to-end.
     url, rss = collector.google_news_rss(f"{query} patent")
     return url, rss, "google_news_rss_patent_fallback"
-
-
+ 
+ 
 def _extract_tech_counts(collector: ExternalSignalCollector, tech_obj: Any, blob: str) -> Dict[str, int]:
     """
     Supports multiple possible implementations:
@@ -110,7 +113,7 @@ def _extract_tech_counts(collector: ExternalSignalCollector, tech_obj: Any, blob
     """
     if not blob.strip():
         return {}
-
+ 
     # Preferred: TechStackCollector if present
     if tech_obj is not None:
         # expected method name: extract()
@@ -121,62 +124,62 @@ def _extract_tech_counts(collector: ExternalSignalCollector, tech_obj: Any, blob
         if hasattr(tech_obj, "extract_tech_stack"):
             counts = tech_obj.extract_tech_stack(blob)
             return counts or {}
-
+ 
     # Fallback to collector method if you placed it there
     if hasattr(collector, "extract_tech_stack"):
         counts = collector.extract_tech_stack(blob)
         return counts or {}
-
+ 
     return {}
-
-
+ 
+ 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data/signals", help="Output folder for proof artifacts")
     ap.add_argument("--companies", required=True, help="Ticker list like CAT,DE or 'all'")
     args = ap.parse_args()
-
+ 
     tickers = (
         list(DEFAULT_COMPANIES.keys())
         if args.companies.lower().strip() == "all"
         else [t.strip().upper() for t in args.companies.split(",") if t.strip()]
     )
-
+ 
     collector = ExternalSignalCollector(user_agent=settings.sec_user_agent)
     store = SignalStore()
     tech = TechStackCollector() if TechStackCollector is not None else None
     s3_enabled = is_s3_configured()
     out_prefix = _normalize_prefix(args.out, "data/signals")
-
+ 
     try:
         for ticker in tickers:
             out_dir = ROOT / Path(out_prefix) / ticker
             artifact_prefix = f"{out_prefix}/{ticker}"
             if not s3_enabled:
                 out_dir.mkdir(parents=True, exist_ok=True)
-
+ 
             if ticker not in DEFAULT_COMPANIES:
                 print(f"SKIP: unknown ticker {ticker}")
                 continue
-
+ 
             company_id = get_company_id(ticker)
             company_name = DEFAULT_COMPANIES[ticker]
-
+ 
             # Keep these defined no matter which branch runs
             jobs_rss: str = ""
             news_rss: str = ""
             patents_rss: str = ""
-
+ 
             # =========================================================
             # 1) JOBS signals (Greenhouse / Lever / RSS fallback)
             # =========================================================
             tokens = JOB_BOARD_TOKENS.get(ticker, {})
             gh = (tokens.get("greenhouse") or "").strip()
             lv = (tokens.get("lever") or "").strip()
-
+ 
             jobs: list[dict] = []
             source_used: Optional[str] = None
-
+ 
             try:
                 if gh:
                     jobs = collector.greenhouse_jobs(gh)
@@ -188,18 +191,19 @@ def main() -> int:
                 print(f"WARN: {ticker} jobs board fetch failed ({e}); falling back to RSS")
                 jobs = []
                 source_used = None
-
+ 
             inserted_jobs = 0
             if jobs:
+                job_summary = summarize_job_signals(normalize_job_rows(jobs))
                 for j in jobs[:50]:
                     title = (j.get("title") or "").strip()
                     url = j.get("url")
                     published_at = j.get("published_at")
-
+ 
                     content_hash = sha256_text(f"jobs|{ticker}|{title}|{url or ''}")
                     if store.signal_exists_by_hash(content_hash):
                         continue
-
+ 
                     store.insert_signal(
                         company_id=company_id,
                         ticker=ticker,
@@ -214,10 +218,15 @@ def main() -> int:
                             "location": j.get("location"),
                             "department": j.get("department"),
                             "collector": source_used,
+                            "score": job_summary.score,
+                            "ai_jobs": job_summary.ai_jobs,
+                            "ai_ratio": job_summary.ai_ratio,
+                            "senior_ai_jobs": job_summary.senior_ai_jobs,
+                            "total_jobs": job_summary.total_jobs,
                         },
                     )
                     inserted_jobs += 1
-
+ 
                 # Proof artifact: small summary JSON
                 jobs_sample = {"source": source_used, "inserted": inserted_jobs, "sample": jobs[:3]}
                 if s3_enabled:
@@ -225,7 +234,7 @@ def main() -> int:
                 else:
                     _write_json(out_dir / "jobs_board_sample.json", jobs_sample)
                 print(f"STORED: {ticker} jobs inserted={inserted_jobs} source={source_used}")
-
+ 
             else:
                 jobs_q = f"{company_name} {ticker} hiring jobs"
                 jobs_url, jobs_rss = collector.google_jobs_rss(jobs_q)
@@ -233,8 +242,10 @@ def main() -> int:
                     upload_text((jobs_rss or "")[:20000], f"{artifact_prefix}/jobs_rss.txt")
                 else:
                     _write_text(out_dir / "jobs_rss.txt", jobs_rss)
-
+ 
                 if jobs_rss:
+                    job_mentions = parse_jobs_rss(jobs_rss)
+                    job_summary = summarize_job_signals(job_mentions)
                     jobs_hash = sha256_text(f"jobs_rss|{ticker}|{jobs_rss}")
                     if not store.signal_exists_by_hash(jobs_hash):
                         store.insert_signal(
@@ -247,14 +258,21 @@ def main() -> int:
                             published_at=None,
                             content_text=jobs_rss[:20000],
                             content_hash=jobs_hash,
-                            metadata={"query": jobs_q, "note": "fallback rss stored (truncated to 20k)"},
+                            metadata={
+                                "query": jobs_q,
+                                "note": "fallback rss stored (truncated to 20k)",
+                                "score": job_summary.score,
+                                "item_count": job_summary.total_jobs,
+                                "ai_jobs": job_summary.ai_jobs,
+                                "ai_ratio": job_summary.ai_ratio,
+                            },
                         )
                         print(f"STORED: {ticker} jobs rss hash={jobs_hash[:10]}")
                     else:
                         print(f"SKIP: {ticker} jobs rss already stored (hash={jobs_hash[:10]})")
                 else:
                     print(f"SKIP: {ticker} no jobs rss returned for query={jobs_q}")
-
+ 
             # =========================================================
             # 2) NEWS signals (Google News RSS)
             # =========================================================
@@ -264,7 +282,7 @@ def main() -> int:
                 upload_text((news_rss or "")[:20000], f"{artifact_prefix}/news_rss.txt")
             else:
                 _write_text(out_dir / "news_rss.txt", news_rss)
-
+ 
             if news_rss:
                 news_hash = sha256_text(f"news_rss|{ticker}|{news_rss}")
                 if store.signal_exists_by_hash(news_hash):
@@ -285,17 +303,44 @@ def main() -> int:
                     print(f"STORED: {ticker} news rss hash={news_hash[:10]}")
             else:
                 print(f"SKIP: {ticker} no news rss returned for query={news_q}")
-
+ 
             # =========================================================
             # 3) TECH STACK signals (external-only proxy)
             # =========================================================
             tech_blob = "\n".join([x for x in [news_rss, jobs_rss] if x])
             tech_counts = _extract_tech_counts(collector, tech, tech_blob)
+            tech_summary = summarize_tech_signals(tech_counts)
             if s3_enabled:
-                upload_json(tech_counts, f"{artifact_prefix}/tech_counts.json")
+                upload_json(
+                    {
+                        "counts": tech_counts,
+                        "summary": {
+                            "score": tech_summary.score,
+                            "unique_keywords": tech_summary.unique_keywords,
+                            "cloud_ml_count": tech_summary.cloud_ml_count,
+                            "ml_framework_count": tech_summary.ml_framework_count,
+                            "data_platform_count": tech_summary.data_platform_count,
+                            "ai_api_count": tech_summary.ai_api_count,
+                        },
+                    },
+                    f"{artifact_prefix}/tech_counts.json",
+                )
             else:
-                _write_json(out_dir / "tech_counts.json", tech_counts)
-
+                _write_json(
+                    out_dir / "tech_counts.json",
+                    {
+                        "counts": tech_counts,
+                        "summary": {
+                            "score": tech_summary.score,
+                            "unique_keywords": tech_summary.unique_keywords,
+                            "cloud_ml_count": tech_summary.cloud_ml_count,
+                            "ml_framework_count": tech_summary.ml_framework_count,
+                            "data_platform_count": tech_summary.data_platform_count,
+                            "ai_api_count": tech_summary.ai_api_count,
+                        },
+                    },
+                )
+ 
             if tech_counts:
                 tech_hash = sha256_text(f"tech|{ticker}|" + json.dumps(tech_counts, sort_keys=True))
                 if store.signal_exists_by_hash(tech_hash):
@@ -313,13 +358,19 @@ def main() -> int:
                         content_hash=tech_hash,
                         metadata={
                             "counts": tech_counts,
+                            "score": tech_summary.score,
+                            "unique_keywords": tech_summary.unique_keywords,
+                            "cloud_ml_count": tech_summary.cloud_ml_count,
+                            "ml_framework_count": tech_summary.ml_framework_count,
+                            "data_platform_count": tech_summary.data_platform_count,
+                            "ai_api_count": tech_summary.ai_api_count,
                             "note": "tech extracted from external RSS blobs (jobs/news)",
                         },
                     )
                     print(f"STORED: {ticker} tech stack hash={tech_hash[:10]}")
             else:
                 print(f"SKIP: {ticker} no tech keywords found in external blobs")
-
+ 
             # =========================================================
             # 4) PATENTS signals (external)
             # =========================================================
@@ -330,8 +381,10 @@ def main() -> int:
                 upload_text((patents_rss or "")[:20000], f"{artifact_prefix}/patents_rss.txt")
             else:
                 _write_text(out_dir / "patents_rss.txt", patents_rss)
-
+ 
             if patents_rss:
+                patent_mentions = parse_patents_rss(patents_rss)
+                patent_summary = summarize_patent_signals(patent_mentions)
                 pat_hash = sha256_text(f"patents_rss|{ticker}|{patents_rss}")
                 if store.signal_exists_by_hash(pat_hash):
                     print(f"SKIP: {ticker} patents rss already stored (hash={pat_hash[:10]})")
@@ -346,23 +399,30 @@ def main() -> int:
                         published_at=None,
                         content_text=patents_rss[:20000],
                         content_hash=pat_hash,
-                        metadata={"query": pat_q, "note": "patents rss stored (truncated to 20k)"},
+                        metadata={
+                            "query": pat_q,
+                            "note": "patents rss stored (truncated to 20k)",
+                            "score": patent_summary.score,
+                            "item_count": patent_summary.total_mentions,
+                            "ai_mentions": patent_summary.ai_mentions,
+                            "ai_ratio": patent_summary.ai_ratio,
+                            "recency_days_median": patent_summary.recency_days_median,
+                        },
                     )
                     print(f"STORED: {ticker} patents rss hash={pat_hash[:10]} source={pat_source}")
             else:
                 print(f"SKIP: {ticker} no patents rss returned for query={pat_q}")
-
+ 
         print("\nOK: External signals collection completed")
         return 0
-
+ 
     finally:
         try:
             collector.close()
         except Exception:
             pass
         store.close()
-
-
+ 
+ 
 if __name__ == "__main__":
     raise SystemExit(main())
-

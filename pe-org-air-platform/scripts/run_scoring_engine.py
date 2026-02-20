@@ -1,7 +1,6 @@
 from __future__ import annotations
  
 import argparse
-from dataclasses import dataclass
 import json
 import math
 import sys
@@ -19,8 +18,8 @@ from app.scoring_engine.composite import compute_composite
 from app.scoring_engine.dimension_pipeline import score_dimensions_for_assessment, upsert_dimension_scores
 from app.scoring_engine.evidence_mapper import EvidenceItem
 from app.scoring_engine.position_factor import PositionFactorCalculator
+from app.scoring_engine.portfolio_priors import PORTFOLIO_PRIORS
 from app.scoring_engine.sector_config import get_company_sector, load_sector_profile
-from app.scoring_engine.sem_confidence import compute_sem_confidence
 from app.scoring_engine.synergy import compute_formula_synergy, compute_synergy, load_synergy_rules
 from app.scoring_engine.talent_concentration import TalentConcentrationCalculator, talent_risk_adjustment
 from app.scoring_engine.vr_model import DimensionInput, compute_vr_score, fetch_dimension_inputs
@@ -43,24 +42,6 @@ def _coefficient_of_variation(values: list[float]) -> float:
         return 0.0
     var = sum((v - mean) ** 2 for v in values) / len(values)
     return math.sqrt(var) / abs(mean)
- 
- 
-@dataclass(frozen=True)
-class PortfolioPrior:
-    vr_target: float
-    pf_target: float
-    tc_target: float
-    market_cap_percentile: float
- 
- 
-# CS3 5-company calibration priors from the case-study portfolio table.
-PORTFOLIO_PRIORS: dict[str, PortfolioPrior] = {
-    "NVDA": PortfolioPrior(vr_target=95.0, pf_target=0.90, tc_target=0.12, market_cap_percentile=0.95),
-    "JPM": PortfolioPrior(vr_target=70.0, pf_target=0.50, tc_target=0.18, market_cap_percentile=0.75),
-    "WMT": PortfolioPrior(vr_target=55.0, pf_target=0.30, tc_target=0.20, market_cap_percentile=0.65),
-    "GE": PortfolioPrior(vr_target=40.0, pf_target=0.00, tc_target=0.25, market_cap_percentile=0.50),
-    "DG": PortfolioPrior(vr_target=25.0, pf_target=-0.30, tc_target=0.30, market_cap_percentile=0.35),
-}
  
  
 def _blend(current: float, target: float, weight: float) -> float:
@@ -135,9 +116,18 @@ def get_latest_assessment_id(cur, company_id: str) -> str:
         (company_id,),
     )
     row = cur.fetchone()
-    if not row:
-        raise SystemExit(f"No assessments found for company_id={company_id}")
-    return str(row[0])
+    if row and row[0]:
+        return str(row[0])
+
+    assessment_id = str(uuid4())
+    cur.execute(
+        """
+        INSERT INTO assessments (id, company_id, assessment_type, assessment_date, status)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (assessment_id, company_id, "cs3_auto", datetime.now(UTC).date().isoformat(), "draft"),
+    )
+    return assessment_id
  
  
 def insert_scoring_run(cur, companies_scored: list[str], model_version: str, params: dict) -> str:
@@ -294,6 +284,8 @@ def _fetch_job_postings(cur, company_id: str, days: int = 365) -> list[dict]:
  
  
 def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> None:
+    from app.scoring_engine.sem_confidence import compute_sem_confidence
+
     assessment_id = get_latest_assessment_id(cur, company_id)
     sector = get_company_sector(cur, company_id)
     profile = load_sector_profile(cur, sector, version=version)
@@ -568,7 +560,6 @@ def get_company_ids(cur, tickers: list[str] | None = None) -> list[str]:
         query = f"""
             SELECT DISTINCT c.id
             FROM companies c
-            JOIN assessments a ON a.company_id = c.id
             WHERE c.is_deleted = FALSE
               AND UPPER(c.ticker) IN ({placeholders})
         """
@@ -578,8 +569,8 @@ def get_company_ids(cur, tickers: list[str] | None = None) -> list[str]:
             """
             SELECT DISTINCT c.id
             FROM companies c
-            JOIN assessments a ON a.company_id = c.id
             WHERE c.is_deleted = FALSE
+              AND c.ticker IS NOT NULL
             """
         )
     return [str(r[0]) for r in (cur.fetchall() or [])]
@@ -656,9 +647,46 @@ def _signal_type_to_evidence_type(signal_type: str) -> str:
     if "news" in st:
         return "leadership_signals"
     return st or "leadership_signals"
- 
- 
-def _load_cs3_items(company_id: str, ticker: str | None) -> list[EvidenceItem]:
+
+
+def _load_latest_def14a_proxy_text(cur, company_id: str, max_chars: int = 600000) -> str:
+    """
+    Build proxy text for board analysis from the latest DEF-14A in Snowflake.
+    """
+    cur.execute(
+        """
+        SELECT id
+        FROM documents
+        WHERE company_id = %s
+          AND UPPER(filing_type) = 'DEF-14A'
+        ORDER BY filing_date DESC, created_at DESC
+        LIMIT 1
+        """,
+        (company_id,),
+    )
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return ""
+    document_id = str(row[0])
+
+    cur.execute(
+        """
+        SELECT content
+        FROM document_chunks
+        WHERE document_id = %s
+        ORDER BY chunk_index ASC
+        """,
+        (document_id,),
+    )
+    chunks = cur.fetchall() or []
+    if not chunks:
+        return ""
+
+    text = "\n ".join(str(r[0] or "") for r in chunks)
+    return text[: max(1, int(max_chars))]
+
+
+def _load_cs3_items(cur, company_id: str, ticker: str | None) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
     if not ticker:
         return items
@@ -682,21 +710,30 @@ def _load_cs3_items(company_id: str, ticker: str | None) -> list[EvidenceItem]:
         pass
  
     try:
+        board_text = ""
         board_path = ROOT / "data" / "board" / f"{ticker.lower()}.html"
         if board_path.exists():
-            html = board_path.read_text(encoding="utf-8", errors="ignore")
+            board_text = board_path.read_text(encoding="utf-8", errors="ignore")
+        else:
+            board_text = _load_latest_def14a_proxy_text(cur, company_id=company_id)
+
+        if board_text:
             analyzer = BoardCompositionAnalyzer()
-            members, committees = analyzer.extract_from_proxy(html)
+            members, committees = analyzer.extract_from_proxy(board_text)
             sig = analyzer.analyze_board(
                 company_id=company_id,
                 ticker=ticker,
                 members=members,
                 committees=committees,
-                strategy_text=html,
+                strategy_text=board_text,
             )
             text_parts = committees + sig.ai_experts
             if sig.has_ai_in_strategy:
                 text_parts.append("ai strategy")
+            if sig.has_risk_tech_oversight:
+                text_parts.append("risk management")
+            if sig.has_data_officer:
+                text_parts.append("chief data officer")
             text = " ".join(text_parts).strip()
             if text:
                 items.append(
@@ -709,7 +746,7 @@ def _load_cs3_items(company_id: str, ticker: str | None) -> list[EvidenceItem]:
                 )
     except Exception:
         pass
- 
+
     return items
  
  
@@ -755,7 +792,7 @@ def fetch_evidence_items(cur, company_id: str, days: int = 365) -> list[Evidence
             )
         )
  
-    items.extend(_load_cs3_items(company_id=company_id, ticker=_get_company_ticker(cur, company_id)))
+    items.extend(_load_cs3_items(cur, company_id=company_id, ticker=_get_company_ticker(cur, company_id)))
     return items
  
  

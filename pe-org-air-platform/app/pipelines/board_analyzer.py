@@ -5,7 +5,10 @@ from decimal import Decimal
 import re
 from typing import List
 
-from bs4 import BeautifulSoup
+try:
+    from bs4 import BeautifulSoup
+except Exception:  # pragma: no cover
+    BeautifulSoup = None
 
 
 @dataclass
@@ -47,6 +50,10 @@ class BoardCompositionAnalyzer:
         "chief data officer", "cdo", "chief ai officer", "caio", "chief analytics officer", "cao", "chief digital officer",
     ]
 
+    @staticmethod
+    def _contains_keyword(text: str, keyword: str) -> bool:
+        return re.search(r"\b" + re.escape(keyword.lower()) + r"\b", (text or "").lower()) is not None
+
     def analyze_board(
         self,
         company_id: str,
@@ -68,7 +75,10 @@ class BoardCompositionAnalyzer:
         for member in members:
             bio_lower = (member.bio or "").lower()
             title_lower = (member.title or "").lower()
-            if any(kw in bio_lower or kw in title_lower for kw in self.AI_EXPERTISE_KEYWORDS):
+            if any(
+                self._contains_keyword(bio_lower, kw) or self._contains_keyword(title_lower, kw)
+                for kw in self.AI_EXPERTISE_KEYWORDS
+            ):
                 ai_experts.append(member.name)
         has_ai_expertise = len(ai_experts) > 0
         if has_ai_expertise:
@@ -119,8 +129,12 @@ class BoardCompositionAnalyzer:
         )
 
     def extract_from_proxy(self, proxy_html: str) -> tuple[List[BoardMember], List[str]]:
-        soup = BeautifulSoup(proxy_html or "", "html.parser")
-        text = soup.get_text(" ", strip=True)
+        if BeautifulSoup is not None:
+            soup = BeautifulSoup(proxy_html or "", "html.parser")
+            text = soup.get_text(" ", strip=True)
+        else:
+            text = re.sub(r"<[^>]+>", " ", proxy_html or "")
+            text = re.sub(r"\s+", " ", text).strip()
 
         committee_pattern = re.compile(
             r"(technology committee|digital committee|innovation committee|it committee|risk committee|cybersecurity committee)",

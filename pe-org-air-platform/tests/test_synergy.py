@@ -22,3 +22,19 @@ def test_synergy_activation_positive():
     res = compute_synergy(scores, rules, cap_abs=15.0)
     assert res.synergy_bonus == 3.0
     assert any(h.activated for h in res.hits)
+
+
+def test_synergy_negative_rule_activation():
+    scores = {"leadership_vision": 75, "use_case_portfolio": 40}
+    rules = [SynergyRule("leadership_vision", "use_case_portfolio", "negative", 60, -3)]
+    res = compute_synergy(scores, rules, cap_abs=15.0)
+    assert res.synergy_bonus == -3.0
+    assert res.hits[0].activated is True
+
+
+def test_synergy_unknown_type_is_ignored():
+    scores = {"a": 90, "b": 90}
+    rules = [SynergyRule("a", "b", "unexpected", 60, 5)]
+    res = compute_synergy(scores, rules, cap_abs=15.0)
+    assert res.synergy_bonus == 0.0
+    assert "unknown" in res.hits[0].reason

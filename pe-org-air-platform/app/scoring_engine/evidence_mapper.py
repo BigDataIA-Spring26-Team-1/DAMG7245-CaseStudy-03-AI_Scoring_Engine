@@ -312,18 +312,49 @@ def _infer_signal_bucket(item: EvidenceItem) -> str:
     """
     Normalize different evidence types into spec buckets.
     """
-    t = (item.evidence_type or "").lower()
+    t = (item.evidence_type or "").strip().lower()
+    normalized = t.replace("-", "_").replace(" ", "_")
+
+    # Explicit 9-source mapping from the scoring design.
+    explicit = {
+        "technology_hiring": "technology_hiring",
+        "jobs": "technology_hiring",
+        "innovation_activity": "innovation_activity",
+        "patents": "innovation_activity",
+        "digital_presence": "digital_presence",
+        "tech": "digital_presence",
+        "leadership_signals": "leadership_signals",
+        "news": "leadership_signals",
+        "sec_item_1": "sec_item_1",
+        "sec_item_1a": "sec_item_1a",
+        "sec_item_7": "sec_item_7",
+        "glassdoor_reviews": "glassdoor_reviews",
+        "board_composition": "board_composition",
+        "10k": "10k",
+    }
+    if normalized in explicit:
+        return explicit[normalized]
+
+    # Heuristic fallback for noisy historical labels.
+    if "item 1a" in t:
+        return "sec_item_1a"
+    if "item 7" in t and "item 7a" not in t:
+        return "sec_item_7"
+    if "item 1" in t and "item 1a" not in t:
+        return "sec_item_1"
+    if "glassdoor" in t and "review" in t:
+        return "glassdoor_reviews"
+    if "board" in t and ("composition" in t or "proxy" in t):
+        return "board_composition"
     if "10-k" in t or "10k" in t or "10 q" in t or "10-q" in t:
         return "10k"
-    if "job" in t:
-        return "jobs"
-    if "news" in t:
-        return "news"
-    if "patent" in t:
-        return "patents"
-    if "tech" in t or "stack" in t:
-        return "tech"
-    return "news"  # safe default bucket
+    if "job" in t or "hiring" in t:
+        return "technology_hiring"
+    if "patent" in t or "innovation" in t:
+        return "innovation_activity"
+    if "tech" in t or "stack" in t or "digital" in t:
+        return "digital_presence"
+    return "leadership_signals"  # safe default bucket
 
 
 def build_source_payloads(mapped: List[MappedEvidence]) -> Dict[str, dict]:

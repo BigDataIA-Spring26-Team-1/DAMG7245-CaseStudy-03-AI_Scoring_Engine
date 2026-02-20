@@ -28,10 +28,33 @@ class DocumentStatus(str, Enum):
     FAILED = "failed"
  
  
-DEFAULT_TICKERS = ["NVDA", "JPM", "WMT", "GE", "DG"]
 TARGET_FORMS = ["10-K", "10-Q", "8-K", "DEF-14A"]
- 
- 
+
+
+def _normalize_tickers(raw: str) -> list[str]:
+    tickers = [t.strip().upper() for t in (raw or "").split(",") if t.strip()]
+    return list(dict.fromkeys(tickers))
+
+
+def get_all_active_tickers() -> list[str]:
+    conn = get_snowflake_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT ticker
+            FROM companies
+            WHERE is_deleted = FALSE
+              AND ticker IS NOT NULL
+            ORDER BY ticker
+            """
+        )
+        return [str(r[0]).upper() for r in (cur.fetchall() or []) if r and r[0]]
+    finally:
+        cur.close()
+        conn.close()
+
+
 def get_company_id_for_ticker(ticker: str) -> str:
     conn = get_snowflake_connection()
     cur = conn.cursor()
@@ -101,10 +124,10 @@ def main() -> int:
     parser.add_argument("--out", default="data/processed", help="Output folder for parsed artifacts")
     args = parser.parse_args()
  
-    tickers = DEFAULT_TICKERS if args.companies.lower().strip() == "all" else [
-        t.strip().upper() for t in args.companies.split(",") if t.strip()
-    ]
- 
+    tickers = get_all_active_tickers() if args.companies.lower().strip() == "all" else _normalize_tickers(args.companies)
+    if not tickers:
+        raise SystemExit("No tickers selected. Ensure companies exist in the companies table or pass --companies.")
+
     base_dir = ROOT
     client = SecEdgarClient(user_agent=settings.sec_user_agent, rate_limit_per_sec=5.0)
     store = EvidenceStore()

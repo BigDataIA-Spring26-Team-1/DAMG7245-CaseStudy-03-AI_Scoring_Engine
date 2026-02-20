@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     # SEC / EDGAR
     sec_user_agent: str = "PE-OrgAIR (Northeastern) yourname@northeastern.edu"
 
+    # RapidAPI / Glassdoor
+    rapidapi_key: str | None = None
+    glassdoor_rapidapi_key: str | None = None
+    glassdoor_rapidapi_host: str = "glassdoor-real-time.p.rapidapi.com"
+    glassdoor_company_search_path: str = "/companies/search"
+    glassdoor_reviews_path: str = "/companies/reviews"
+    glassdoor_reviews_page_size: int = 50
+    glassdoor_cache_to_disk: bool = True
+    # If true, skip multi-parameter discovery/query fallbacks to minimize API usage.
+    glassdoor_disable_discovery_fallback: bool = False
+    # Query param key for reviews endpoint, usually "companyId".
+    glassdoor_reviews_company_id_param: str = "companyId"
+    # JSON string map like {"NVDA":"40772"}.
+    glassdoor_company_id_map: str | None = None
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

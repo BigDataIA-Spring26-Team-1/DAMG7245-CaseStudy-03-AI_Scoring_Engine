@@ -26,26 +26,41 @@ try:
 except Exception:  # pragma: no cover
     TechStackCollector = None  # type: ignore
  
- 
-DEFAULT_COMPANIES: dict[str, str] = {
-    "NVDA": "NVIDIA",
-    "JPM": "JPMorgan",
-    "WMT": "Walmart",
-    "GE": "General Electric",
-    "DG": "Dollar General",
-}
- 
 # Optional job board tokens; leave blank to use RSS fallback.
-JOB_BOARD_TOKENS: dict[str, dict[str, str]] = {t: {"greenhouse": "", "lever": ""} for t in DEFAULT_COMPANIES.keys()}
+JOB_BOARD_TOKENS: dict[str, dict[str, str]] = {}
  
  
-def get_company_id(ticker: str) -> str:
+def _normalize_tickers(raw: str) -> list[str]:
+    tickers = [t.strip().upper() for t in (raw or "").split(",") if t.strip()]
+    return list(dict.fromkeys(tickers))
+
+
+def get_all_active_tickers() -> list[str]:
     conn = get_snowflake_connection()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT id
+            SELECT DISTINCT ticker
+            FROM companies
+            WHERE is_deleted = FALSE
+              AND ticker IS NOT NULL
+            ORDER BY ticker
+            """
+        )
+        return [str(r[0]).upper() for r in (cur.fetchall() or []) if r and r[0]]
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_company_profile(ticker: str) -> tuple[str, str]:
+    conn = get_snowflake_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, name
             FROM companies
             WHERE ticker=%s AND is_deleted=FALSE
             ORDER BY created_at DESC
@@ -58,7 +73,9 @@ def get_company_id(ticker: str) -> str:
             raise RuntimeError(f"Missing company row for {ticker}. Run backfill_companies.py")
         if len(rows) > 1:
             raise RuntimeError(f"Duplicate active company rows found for ticker={ticker}")
-        return str(rows[0][0])
+        company_id = str(rows[0][0])
+        company_name = str(rows[0][1] or ticker).strip() or ticker
+        return company_id, company_name
     finally:
         cur.close()
         conn.close()
@@ -143,11 +160,9 @@ def main() -> int:
     ap.add_argument("--companies", required=True, help="Ticker list like CAT,DE or 'all'")
     args = ap.parse_args()
  
-    tickers = (
-        list(DEFAULT_COMPANIES.keys())
-        if args.companies.lower().strip() == "all"
-        else [t.strip().upper() for t in args.companies.split(",") if t.strip()]
-    )
+    tickers = get_all_active_tickers() if args.companies.lower().strip() == "all" else _normalize_tickers(args.companies)
+    if not tickers:
+        raise SystemExit("No tickers selected. Ensure companies exist in the companies table or pass --companies.")
  
     collector = ExternalSignalCollector(user_agent=settings.sec_user_agent)
     store = SignalStore()
@@ -162,12 +177,11 @@ def main() -> int:
             if not s3_enabled:
                 out_dir.mkdir(parents=True, exist_ok=True)
  
-            if ticker not in DEFAULT_COMPANIES:
-                print(f"SKIP: unknown ticker {ticker}")
+            try:
+                company_id, company_name = get_company_profile(ticker)
+            except Exception as exc:
+                print(f"SKIP: {ticker} ({exc})")
                 continue
- 
-            company_id = get_company_id(ticker)
-            company_name = DEFAULT_COMPANIES[ticker]
  
             # Keep these defined no matter which branch runs
             jobs_rss: str = ""

@@ -1,31 +1,31 @@
 from __future__ import annotations
-
+ 
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
-
+ 
 from fastapi import APIRouter, HTTPException, Query
-
+ 
 from app.config import settings
 from app.models.company import CompanyCreate, CompanyOut, CompanyUpdate, IndustryOut
 from app.models.pagination import Page
-from app.services.redis_cache import cache_delete, cache_get_json, cache_set_json
+from app.services.redis_cache import cache_delete, cache_delete_pattern, cache_get_json, cache_set_json
 from app.services.snowflake import get_snowflake_connection
-
+ 
 router = APIRouter(prefix="/companies")
-
-
+ 
+ 
 def _is_unique_constraint_violation(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "unique" in msg and ("constraint" in msg or "key" in msg)
-
-
+ 
+ 
 def _ticker_conflict_detail(ticker: str | None) -> str:
     if ticker:
         return f"Ticker already exists: {ticker}"
     return "Company ticker already exists"
-
-
+ 
+ 
 def _row_to_company_out(row: tuple[Any, ...]) -> CompanyOut:
     # Order must match SELECT columns
     return CompanyOut(
@@ -38,14 +38,18 @@ def _row_to_company_out(row: tuple[Any, ...]) -> CompanyOut:
         created_at=row[6],
         updated_at=row[7],
     )
-
-
+ 
+ 
+def _companies_list_cache_key(page: int, page_size: int) -> str:
+    return f"companies:list:page:{page}:size:{page_size}"
+ 
+ 
 @router.post("", response_model=CompanyOut, status_code=201)
 def create_company(payload: CompanyCreate) -> CompanyOut:
     company_id = str(uuid4())
     now = datetime.now(timezone.utc)
     industry_id = str(payload.industry_id) if payload.industry_id is not None else None
-
+ 
     conn = get_snowflake_connection()
     cur = conn.cursor()
     try:
@@ -57,12 +61,12 @@ def create_company(payload: CompanyCreate) -> CompanyOut:
             )
             if cur.fetchone() is None:
                 raise HTTPException(status_code=400, detail="Invalid industry_id")
-
+ 
         if payload.ticker:
             cur.execute("SELECT id FROM companies WHERE ticker = %s LIMIT 1", (payload.ticker,))
             if cur.fetchone() is not None:
                 raise HTTPException(status_code=409, detail=_ticker_conflict_detail(payload.ticker))
-
+ 
         try:
             cur.execute(
                 """
@@ -83,7 +87,7 @@ def create_company(payload: CompanyCreate) -> CompanyOut:
             if _is_unique_constraint_violation(exc):
                 raise HTTPException(status_code=409, detail=_ticker_conflict_detail(payload.ticker))
             raise
-
+ 
         cur.execute(
             """
             SELECT id, name, ticker, industry_id, position_factor, is_deleted, created_at, updated_at
@@ -99,23 +103,28 @@ def create_company(payload: CompanyCreate) -> CompanyOut:
             company,
             settings.redis_ttl_company_seconds,
         )
+        cache_delete_pattern("companies:list:*")
         return company
     finally:
         cur.close()
         conn.close()
-
-
+ 
+ 
 @router.get("", response_model=Page[CompanyOut])
 def list_companies(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> Page[CompanyOut]:
-
+    cache_key = _companies_list_cache_key(page, page_size)
+    cached = cache_get_json(cache_key)
+    if cached is not None:
+        return Page[CompanyOut](**cached)
+ 
     offset = (page - 1) * page_size
-
+ 
     conn = get_snowflake_connection()
     cur = conn.cursor()
-
+ 
     try:
         # total count
         cur.execute(
@@ -126,7 +135,7 @@ def list_companies(
             """
         )
         total = cur.fetchone()[0]
-
+ 
         # paged data
         cur.execute(
             """
@@ -139,29 +148,35 @@ def list_companies(
             """,
             (page_size, offset),
         )
-
+ 
         rows = cur.fetchall()
         items = [_row_to_company_out(r) for r in rows]
-
-        return Page.create(
+ 
+        page_out = Page.create(
             items=items,
             page=page,
             page_size=page_size,
             total=total,
         )
-
+        cache_set_json(
+            cache_key,
+            page_out.model_dump(mode="json"),
+            settings.redis_ttl_seconds,
+        )
+        return page_out
+ 
     finally:
         cur.close()
         conn.close()
-
-
+ 
+ 
 @router.get("/industries", response_model=list[IndustryOut])
 def list_industries() -> list[IndustryOut]:
     cache_key = "industries:list"
     cached = cache_get_json(cache_key)
     if cached is not None:
         return [IndustryOut(**x) for x in cached]
-
+ 
     conn = get_snowflake_connection()
     cur = conn.cursor()
     try:
@@ -188,17 +203,17 @@ def list_industries() -> list[IndustryOut]:
     finally:
         cur.close()
         conn.close()
-
-
+ 
+ 
 @router.get("/{company_id}", response_model=CompanyOut)
 def get_company(company_id: str) -> CompanyOut:
     cache_key = f"company:{company_id}"
-
+ 
     # 1) Try Redis first
     cached = cache_get_json(cache_key)
     if cached is not None:
         return CompanyOut(**cached)
-
+ 
     # 2) Fallback to Snowflake
     conn = get_snowflake_connection()
     cur = conn.cursor()
@@ -214,22 +229,22 @@ def get_company(company_id: str) -> CompanyOut:
         row = cur.fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Company not found")
-
+ 
         company = _row_to_company_out(row)
-
+ 
         # 3) Store in Redis with TTL
         cache_set_json(
             cache_key,
             company,
             settings.redis_ttl_company_seconds,
         )
-
+ 
         return company
     finally:
         cur.close()
         conn.close()
-
-
+ 
+ 
 @router.put("/{company_id}", response_model=CompanyOut)
 def update_company(company_id: str, payload: CompanyUpdate) -> CompanyOut:
     conn = get_snowflake_connection()
@@ -242,18 +257,18 @@ def update_company(company_id: str, payload: CompanyUpdate) -> CompanyOut:
         )
         if cur.fetchone() is None:
             raise HTTPException(status_code=404, detail="Company not found")
-
+ 
         # Optional industry existence check
         industry_id = str(payload.industry_id) if payload.industry_id is not None else None
         if industry_id:
             cur.execute("SELECT 1 FROM industries WHERE id = %s", (industry_id,))
             if cur.fetchone() is None:
                 raise HTTPException(status_code=400, detail="Invalid industry_id")
-
+ 
         # Build partial update dynamically
         updates = []
         params: list[Any] = []
-
+ 
         if payload.name is not None:
             updates.append("name = %s")
             params.append(payload.name)
@@ -272,9 +287,9 @@ def update_company(company_id: str, payload: CompanyUpdate) -> CompanyOut:
         if payload.position_factor is not None:
             updates.append("position_factor = %s")
             params.append(payload.position_factor)
-
+ 
         updates.append("updated_at = CURRENT_TIMESTAMP()")
-
+ 
         if len(updates) == 1:  # only updated_at
             # No actual fields provided
             pass
@@ -287,7 +302,7 @@ def update_company(company_id: str, payload: CompanyUpdate) -> CompanyOut:
                 if _is_unique_constraint_violation(exc):
                     raise HTTPException(status_code=409, detail=_ticker_conflict_detail(payload.ticker))
                 raise
-
+ 
         cur.execute(
             """
             SELECT id, name, ticker, industry_id, position_factor, is_deleted, created_at, updated_at
@@ -303,12 +318,13 @@ def update_company(company_id: str, payload: CompanyUpdate) -> CompanyOut:
             company,
             settings.redis_ttl_company_seconds,
         )
+        cache_delete_pattern("companies:list:*")
         return company
     finally:
         cur.close()
         conn.close()
-
-
+ 
+ 
 @router.delete("/{company_id}", status_code=204)
 def delete_company(company_id: str) -> None:
     conn = get_snowflake_connection()
@@ -325,7 +341,10 @@ def delete_company(company_id: str) -> None:
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Company not found")
         cache_delete(f"company:{company_id}")
+        cache_delete_pattern("companies:list:*")
         return None
     finally:
         cur.close()
         conn.close()
+ 
+ 

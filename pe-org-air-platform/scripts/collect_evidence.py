@@ -1,15 +1,15 @@
 from __future__ import annotations
-
+ 
 import argparse
 import sys
 from pathlib import Path
 from uuid import uuid4
 from enum import Enum
-
+ 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
+ 
 from app.config import settings
  
 from app.pipelines.sec_edgar import SecEdgarClient, store_raw_filing
@@ -28,8 +28,8 @@ class DocumentStatus(str, Enum):
     FAILED = "failed"
  
  
-DEFAULT_TICKERS = ["CAT", "DE", "UNH", "HCA", "ADP", "PAYX", "WMT", "TGT", "JPM", "GS"]
-TARGET_FORMS = ["10-K", "10-Q", "8-K"]
+DEFAULT_TICKERS = ["NVDA", "JPM", "WMT", "GE", "DG"]
+TARGET_FORMS = ["10-K", "10-Q", "8-K", "DEF-14A"]
  
  
 def get_company_id_for_ticker(ticker: str) -> str:
@@ -55,13 +55,13 @@ def get_company_id_for_ticker(ticker: str) -> str:
     finally:
         cur.close()
         conn.close()
-
-
+ 
+ 
 def _normalize_prefix(prefix: str, default_prefix: str) -> str:
     normalized = prefix.strip().strip("/\\").replace("\\", "/")
     return normalized or default_prefix
-
-
+ 
+ 
 def _write_processed_artifacts(
     base_dir: Path,
     out_prefix: str,
@@ -74,13 +74,13 @@ def _write_processed_artifacts(
     base_name = f"{filing.form}_{filing.filing_date}_{filing.accession}"
     body_text = parsed.sections.get("Item 1A") or parsed.full_text[:20000]
     chunks_text = "\n\n--- CHUNK ---\n\n".join([c.content[:1500] for c in chunks[:10]])
-
+ 
     if s3_enabled:
         key_prefix = f"{out_prefix}/{ticker}"
         upload_text(body_text, f"{key_prefix}/{base_name}.txt")
         upload_text(chunks_text, f"{key_prefix}/{base_name}_chunks.txt")
         return
-
+ 
     out_dir = base_dir / Path(out_prefix) / ticker
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{base_name}.txt").write_text(
@@ -150,11 +150,11 @@ def main() -> int:
                     parsed = parse_filing_bytes(raw, file_hint=f.primary_doc)
                     content_hash = parsed.content_hash
                     status = DocumentStatus.PARSED.value
-
+ 
                     # Step 3: chunk
                     chunks = chunk_document(parsed)
                     status = DocumentStatus.CHUNKED.value
-
+ 
                     # Always write proof artifacts (local or S3), even if deduped in DB
                     _write_processed_artifacts(
                         base_dir=base_dir,
@@ -234,12 +234,17 @@ def main() -> int:
                         )
                     print(f"FAILED: {ticker} {f.form} {f.filing_date} error={err}")
                     continue
-
+ 
                 if chunks and len(chunks) > 1:
+                    preview_0 = chunks[0].content[-200:].replace("\n", " ")
+                    preview_1 = chunks[1].content[:200].replace("\n", " ")
+                    # Avoid Windows console encoding crashes for non-CP1252 chars.
+                    preview_0 = preview_0.encode("cp1252", errors="ignore").decode("cp1252")
+                    preview_1 = preview_1.encode("cp1252", errors="ignore").decode("cp1252")
                     print("Overlap proof:")
-                    print("chunk0_end:", chunks[0].content[-200:].replace("\n", " "))
-                    print("chunk1_start:", chunks[1].content[:200].replace("\n", " "))
-
+                    print("chunk0_end:", preview_0)
+                    print("chunk1_start:", preview_1)
+ 
  
         print("\nOK: Evidence collection completed")
         return 0
@@ -251,3 +256,5 @@ def main() -> int:
  
 if __name__ == "__main__":
     raise SystemExit(main())
+ 
+ 

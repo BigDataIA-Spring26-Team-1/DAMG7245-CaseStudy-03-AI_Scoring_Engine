@@ -1,11 +1,12 @@
 from __future__ import annotations
- 
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+import json
 from typing import List
 from xml.etree import ElementTree as ET
- 
+
 AI_PATENT_KEYWORDS = [
     "ai",
     "artificial intelligence", "machine learning", "deep learning", "neural", "computer vision",
@@ -59,6 +60,55 @@ def parse_patents_rss(rss_xml: str) -> List[PatentMention]:
         out.append(PatentMention(title=title, url=link, published_at=pub))
  
     return out
+
+
+def parse_patents_serpapi(payload_json: str) -> List[PatentMention]:
+    """
+    Parse SerpApi Google Patents JSON payload into normalized mentions.
+    """
+    if not payload_json.strip():
+        return []
+
+    try:
+        payload = json.loads(payload_json)
+    except Exception:
+        return []
+
+    rows = []
+    if isinstance(payload, dict):
+        rows = payload.get("organic_results", [])
+    if not isinstance(rows, list):
+        return []
+
+    out: List[PatentMention] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", "")).strip()
+        link = str(row.get("link", "")).strip() or None
+
+        # SerpApi may provide a date field in different keys
+        date_raw = (
+            row.get("filing_date")
+            or row.get("publication_date")
+            or row.get("date")
+            or row.get("priority_date")
+            or None
+        )
+        pub = _safe_dt(str(date_raw)) if date_raw else None
+        out.append(PatentMention(title=title, url=link, published_at=pub))
+
+    return out
+
+
+def parse_patents_payload(payload_text: str, source: str) -> List[PatentMention]:
+    """
+    Parse patents payload by source type.
+    """
+    s = (source or "").lower()
+    if "serpapi" in s:
+        return parse_patents_serpapi(payload_text)
+    return parse_patents_rss(payload_text)
  
  
 def summarize_patent_signals(mentions: List[PatentMention]) -> PatentSignalSummary:

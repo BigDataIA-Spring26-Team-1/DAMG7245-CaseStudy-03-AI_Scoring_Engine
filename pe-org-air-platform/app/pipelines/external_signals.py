@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -227,3 +228,32 @@ class ExternalSignalCollector:
         r = self.client.get(url)
         r.raise_for_status()
         return url, r.text or ""
+
+    def google_patents_serpapi(
+        self,
+        query: str,
+        *,
+        num: int = 20,
+        page: int = 1,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """
+        Query SerpApi Google Patents endpoint and return JSON payload.
+
+        Expected env var:
+          - SERPAPI_KEY
+        """
+        api_key = (os.getenv("SERPAPI_KEY") or "").strip()
+        if not api_key:
+            raise ValueError("SERPAPI_KEY is not set")
+
+        params = {
+            "engine": "google_patents",
+            "q": query,
+            "page": max(1, int(page)),
+            "num": max(1, min(int(num), 100)),
+            "api_key": api_key,
+        }
+        url = "https://serpapi.com/search.json"
+        r = self.client.get(url, params=params)
+        r.raise_for_status()
+        return str(r.url), (r.json() or {})

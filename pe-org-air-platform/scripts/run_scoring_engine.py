@@ -1,6 +1,5 @@
 # scripts/run_scoring_engine.py
 from __future__ import annotations
-
 import argparse
 from email import parser
 import json
@@ -8,13 +7,10 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 from datetime import datetime, UTC
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
 from app.services.snowflake import get_snowflake_connection
-
 from app.scoring_engine.sector_config import get_company_sector, load_sector_profile
 from app.scoring_engine.vr_model import fetch_dimension_inputs, compute_vr_score, DimensionInput
 from app.scoring_engine.hr_baselines import compute_hr_factor, apply_hr_adjustment_to_talent
@@ -22,11 +18,11 @@ from app.scoring_engine.synergy import load_synergy_rules, compute_synergy
 from app.scoring_engine.talent_penalty import compute_talent_penalty
 from app.scoring_engine.composite import compute_composite
 from app.scoring_engine.sem_confidence import compute_sem_confidence  
-
+from app.scoring_engine.dimension_pipeline import score_dimensions_for_assessment, upsert_dimension_scores
+from app.scoring_engine.evidence_mapper import EvidenceItem
 
 def _now_ts() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
-
 
 def get_latest_assessment_id(cur, company_id: str) -> str:
     cur.execute(
@@ -43,7 +39,6 @@ def get_latest_assessment_id(cur, company_id: str) -> str:
     if not row:
         raise SystemExit(f"No assessments found for company_id={company_id}")
     return str(row[0])
-
 
 def insert_scoring_run(cur, companies_scored: list[str], model_version: str, params: dict) -> str:
     """
@@ -71,7 +66,6 @@ def insert_scoring_run(cur, companies_scored: list[str], model_version: str, par
     )
     return run_id
 
-
 def update_scoring_run_status(cur, run_id: str, status: str) -> None:
     cur.execute(
         """
@@ -81,7 +75,6 @@ def update_scoring_run_status(cur, run_id: str, status: str) -> None:
         """,
         (status, run_id),
     )
-
 
 def audit_log(cur, run_id: str, company_id: str, step: str, input_obj: dict, output_obj: dict) -> None:
     """
@@ -107,7 +100,6 @@ def audit_log(cur, run_id: str, company_id: str, step: str, input_obj: dict, out
             json.dumps(output_obj),
         ),
     )
-
 
 def upsert_org_air_score(
     cur,
@@ -181,17 +173,13 @@ def upsert_org_air_score(
         ),
     )
 
-
 def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> None:
     assessment_id = get_latest_assessment_id(cur, company_id)
-
     # Sector profile (weights + sector name for auditability)
     sector = get_company_sector(cur, company_id)
     profile = load_sector_profile(cur, sector, version=version)
-
     # Dimension inputs from Snowflake
     dims = fetch_dimension_inputs(cur, assessment_id)
-
     # HR adjustment (applies only to talent_skills)
     hr = compute_hr_factor(cur, company_id=company_id, sector_name=sector, version=version)
     adjusted_dims: list[DimensionInput] = []
@@ -209,7 +197,6 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
                 evidence_count=d.evidence_count,
             )
         )
-
     audit_log(
         cur,
         run_id,
@@ -224,12 +211,10 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
             "window_days": hr.window_days,
         },
     )
-
     # Synergy
     rules = load_synergy_rules(cur, version=version)
     scores_by_dim = {d.dimension: d.raw_score for d in adjusted_dims}
     syn = compute_synergy(scores_by_dim, rules, cap_abs=15.0)
-
     audit_log(
         cur,
         run_id,
@@ -252,10 +237,8 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
             ],
         },
     )
-
     # Talent penalty (HHI)
     pen = compute_talent_penalty(cur, company_id=company_id, version=version)
-
     audit_log(
         cur,
         run_id,
@@ -270,10 +253,24 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
             "function_counts": pen.function_counts,
         },
     )
-
+    evidence_items = fetch_evidence_items(cur, company_id)
+    dim_out = score_dimensions_for_assessment(
+        company_id=company_id,
+        assessment_id=assessment_id,
+        evidence_items=evidence_items,
+    )
+    upsert_dimension_scores(cur, assessment_id, dim_out.results)
+ 
+    audit_log(
+        cur,
+        run_id,
+        company_id,
+        "dimension_scoring",
+        {"assessment_id": assessment_id, "evidence_items": len(evidence_items), "source_payloads": dim_out.source_payloads},
+        {"dimensions": [{"dimension": r.dimension, "score": r.score, "confidence": r.confidence, "evidence_count": r.evidence_count} for r in dim_out.results]},
+    )
     # VR
     vr, vr_breakdown = compute_vr_score(adjusted_dims, profile.weights)
-
     audit_log(
         cur,
         run_id,
@@ -282,14 +279,13 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         {"sector": sector, "version": version},
         {"vr_score": vr, "dimension_breakdown": vr_breakdown},
     )
-
     # Composite
     comp = compute_composite(
         vr_score=vr,
         synergy_bonus=syn.synergy_bonus,
         penalty_factor=pen.penalty_factor,
     )
-
+    
     # ✅ SEM confidence intervals (or bootstrap fallback)
     sem = compute_sem_confidence(
         cur,
@@ -298,7 +294,6 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         composite_score=comp.composite_score,
         version=version,
     )
-
     audit_log(
         cur,
         run_id,
@@ -307,7 +302,6 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         {"company_id": company_id, "assessment_id": assessment_id, "composite_score": comp.composite_score},
         sem,
     )
-
     breakdown_json = {
         "sector": sector,
         "version": version,
@@ -355,10 +349,8 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         "sem": sem,  # ✅ NEW
         "generated_at_utc": _now_ts(),
     }
-
     # Store penalty as "magnitude" (0.0 means no penalty)
     penalty_magnitude = float(1.0 - pen.penalty_factor)
-
     upsert_org_air_score(
         cur,
         company_id=company_id,
@@ -373,7 +365,6 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         score_band=comp.score_band,
         breakdown_json=breakdown_json,
     )
-
     audit_log(
         cur,
         run_id,
@@ -382,7 +373,6 @@ def score_one_company(cur, *, company_id: str, version: str, run_id: str) -> Non
         {"target_table": "org_air_scores"},
         {"status": "upserted", "composite_score": comp.composite_score, "score_band": comp.score_band},
     )
-
 def get_company_ids(cur, tickers: list[str] | None = None) -> list[str]:
     """
     Returns company IDs that are eligible for scoring (i.e., have at least one assessment).
@@ -407,7 +397,6 @@ def get_company_ids(cur, tickers: list[str] | None = None) -> list[str]:
             WHERE c.is_deleted = FALSE
             """
         )
- 
     return [str(r[0]) for r in (cur.fetchall() or [])]
 
 def main() -> int:
@@ -419,27 +408,20 @@ def main() -> int:
     parser.add_argument("--model-version", default="cs3-scoring-v1")
     args = parser.parse_args()
     args = parser.parse_args()
-
     conn = get_snowflake_connection()
     cur = conn.cursor()
     run_id = None
-
-
     if not args.batch and not args.company_id:
         raise SystemExit("Provide --company-id or use --batch")
- 
     tickers = None
     if args.tickers:
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
-    
     if args.batch:
         company_ids = get_company_ids(cur, tickers=tickers)
     else:
         company_ids = [args.company_id]
-    
     if not company_ids:
         raise SystemExit("No companies selected for scoring")
-
     try:
         run_id = insert_scoring_run(
             cur,
@@ -451,7 +433,6 @@ def main() -> int:
                 "tickers": tickers,
             },
         )
-        
         for cid in company_ids:
             score_one_company(
                 cur,
@@ -459,15 +440,11 @@ def main() -> int:
                 version=args.version,
                 run_id=run_id,
             )
-        
-
         update_scoring_run_status(cur, run_id, "success")
         conn.commit()
-
         print("Scoring run completed")
         print(f"run_id: {run_id}")
         return 0
-
     except Exception:
         if run_id:
             try:
@@ -476,11 +453,56 @@ def main() -> int:
             except Exception:
                 pass
         raise
-
     finally:
         cur.close()
         conn.close()
 
+def fetch_evidence_items(cur, company_id: str, days: int = 365) -> list[EvidenceItem]:
+    """
+    Minimal evidence pull for Phase 2:
+    - documents chunks (10-K/10-Q/8-K) from documents + document_chunks
+    - external signals from external_signals
+    """
+    items: list[EvidenceItem] = []
+    # Document chunks
+    cur.execute(
+        """
+        SELECT d.filing_type, d.source_url, c.content
+        FROM documents d
+        JOIN document_chunks c ON c.document_id = d.id
+        WHERE d.company_id = %s
+        """,
+        (company_id,),
+    )
+    for filing_type, url, content in cur.fetchall() or []:
+        items.append(
+            EvidenceItem(
+                source="document_chunk",
+                evidence_type=str(filing_type or "10-K"),
+                text=str(content or ""),
+                url=str(url) if url else None,
+            )
+        )
+    # External signals
+    cur.execute(
+        """
+        SELECT signal_type, url, title, content_text
+        FROM external_signals
+        WHERE company_id = %s
+        """,
+        (company_id,),
+    )
+    for signal_type, url, title, content_text in cur.fetchall() or []:
+        txt = " ".join([str(title or ""), str(content_text or "")]).strip()
+        items.append(
+            EvidenceItem(
+                source="external_signal",
+                evidence_type=str(signal_type or "news"),
+                text=txt,
+                url=str(url) if url else None,
+            )
+        )
+    return items
 
 if __name__ == "__main__":
     raise SystemExit(main())

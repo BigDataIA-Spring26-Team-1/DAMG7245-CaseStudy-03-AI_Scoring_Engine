@@ -1,39 +1,44 @@
 from __future__ import annotations
-
+ 
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 import re
 from typing import Dict, List
-
-from app.scoring_engine.evidence_mapper import DimensionFeature
+ 
+from app.scoring_engine.evidence_mapper import (
+    DimensionFeature,
+    MappedEvidence,
+    build_source_payloads,
+    map_sources_to_dimension_features,
+)
 from app.scoring_engine.mapping_config import DIMENSIONS
-
-
+ 
+ 
 class ScoreLevel(Enum):
     LEVEL_5 = (80, 100, "Excellent")
     LEVEL_4 = (60, 79, "Good")
     LEVEL_3 = (40, 59, "Adequate")
     LEVEL_2 = (20, 39, "Developing")
     LEVEL_1 = (0, 19, "Nascent")
-
+ 
     @property
     def min_score(self) -> int:
         return self.value[0]
-
+ 
     @property
     def max_score(self) -> int:
         return self.value[1]
-
-
+ 
+ 
 @dataclass(frozen=True)
 class RubricCriteria:
     level: ScoreLevel
     keywords: List[str]
     min_keyword_matches: int
     quantitative_threshold: float
-
-
+ 
+ 
 @dataclass(frozen=True)
 class RubricResult:
     dimension: str
@@ -43,8 +48,8 @@ class RubricResult:
     keyword_match_count: int
     confidence: Decimal
     rationale: str
-
-
+ 
+ 
 @dataclass(frozen=True)
 class DimensionScoreResult:
     dimension: str
@@ -53,12 +58,12 @@ class DimensionScoreResult:
     evidence_count: int
     top_keywords: List[str]
     reasons: List[str]
-
-
+ 
+ 
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, float(x)))
-
-
+ 
+ 
 def _mk_levels(
     l5: RubricCriteria,
     l4: RubricCriteria,
@@ -73,8 +78,8 @@ def _mk_levels(
         ScoreLevel.LEVEL_2: l2,
         ScoreLevel.LEVEL_1: l1,
     }
-
-
+ 
+ 
 DIMENSION_RUBRICS: Dict[str, Dict[ScoreLevel, RubricCriteria]] = {
     "talent": _mk_levels(
         RubricCriteria(ScoreLevel.LEVEL_5, ["ml platform", "ai research", "large team", "principal ml", "staff ml"], 3, 0.40),
@@ -126,15 +131,15 @@ DIMENSION_RUBRICS: Dict[str, Dict[ScoreLevel, RubricCriteria]] = {
         RubricCriteria(ScoreLevel.LEVEL_1, ["hostile", "siloed", "no data culture"], 1, 0.00),
     ),
 }
-
-
+ 
+ 
 FEATURE_TO_RUBRIC_DIM = {
     "talent_skills": "talent",
     "leadership_vision": "leadership",
     "culture_change": "culture",
 }
-
-
+ 
+ 
 DIMENSION_METRIC_KEY = {
     "talent": "ai_job_ratio",
     "data_infrastructure": "data_quality_ratio",
@@ -144,27 +149,27 @@ DIMENSION_METRIC_KEY = {
     "use_case_portfolio": "production_use_case_ratio",
     "culture": "culture_index",
 }
-
-
+ 
+ 
 def _find_matches(text: str, keywords: List[str]) -> List[str]:
     matches: List[str] = []
     for kw in keywords:
         if re.search(r"\b" + re.escape(kw.lower()) + r"\b", text):
             matches.append(kw)
     return matches
-
-
+ 
+ 
 def _interpolate(level: ScoreLevel, keyword_hits: int, needed: int) -> Decimal:
     lo, hi = level.min_score, level.max_score
     ratio = 1.0 if needed <= 0 else min(1.0, keyword_hits / needed)
     score = lo + (hi - lo) * ratio
     return Decimal(str(round(score, 2)))
-
-
+ 
+ 
 class RubricScorer:
     def __init__(self) -> None:
         self.rubrics = DIMENSION_RUBRICS
-
+ 
     def score_dimension(
         self,
         dimension: str,
@@ -176,7 +181,7 @@ class RubricScorer:
         rubric = self.rubrics.get(dim, {})
         metric_key = DIMENSION_METRIC_KEY.get(dim, "")
         metric_val = float(quantitative_metrics.get(metric_key, 0.0))
-
+ 
         for level in [
             ScoreLevel.LEVEL_5,
             ScoreLevel.LEVEL_4,
@@ -200,7 +205,7 @@ class RubricScorer:
                     confidence=conf,
                     rationale=f"{dim}: level={level.name}, metric={metric_key}:{metric_val:.3f}",
                 )
-
+ 
         return RubricResult(
             dimension=dim,
             level=ScoreLevel.LEVEL_1,
@@ -210,7 +215,7 @@ class RubricScorer:
             confidence=Decimal("0.40"),
             rationale=f"{dim}: no rubric level met",
         )
-
+ 
     def score_all_dimensions(
         self,
         evidence_by_dimension: Dict[str, str],
@@ -224,8 +229,8 @@ class RubricScorer:
                 quantitative_metrics=metrics_by_dimension.get(dim, {}),
             )
         return out
-
-
+ 
+ 
 def _default_result(dim: str) -> DimensionScoreResult:
     return DimensionScoreResult(
         dimension=dim,
@@ -235,29 +240,91 @@ def _default_result(dim: str) -> DimensionScoreResult:
         top_keywords=[],
         reasons=["No evidence found -> default score=50"],
     )
-
-
+ 
+ 
+def _build_quant_metrics(feature_dim: str, f: DimensionFeature) -> Dict[str, float]:
+    dim = FEATURE_TO_RUBRIC_DIM.get(feature_dim, feature_dim)
+    key = DIMENSION_METRIC_KEY.get(dim, "")
+    if not key:
+        return {}
+ 
+    # Scale deterministic feature signals into [0,1] rubric metric proxies.
+    ws_norm = clamp(f.weighted_signal / 30.0, 0.0, 1.0)
+    ev_norm = clamp(f.evidence_count / 40.0, 0.0, 1.0)
+    rel_norm = clamp(f.reliability_weighted, 0.0, 1.0)
+    metric_val = clamp(0.45 * ws_norm + 0.35 * ev_norm + 0.20 * rel_norm, 0.0, 1.0)
+    return {key: metric_val}
+ 
+ 
+RUBRIC_FALLBACK_THRESHOLDS: Dict[str, Dict[str, float]] = {
+    "data_infrastructure": {"low": 4.0, "mid": 10.0, "high": 18.0, "very_high": 28.0},
+    "ai_governance": {"low": 3.0, "mid": 9.0, "high": 16.0, "very_high": 26.0},
+    "technology_stack": {"low": 4.0, "mid": 11.0, "high": 19.0, "very_high": 30.0},
+    "talent_skills": {"low": 5.0, "mid": 12.0, "high": 20.0, "very_high": 32.0},
+    "leadership_vision": {"low": 3.0, "mid": 9.0, "high": 16.0, "very_high": 26.0},
+    "use_case_portfolio": {"low": 4.0, "mid": 10.0, "high": 18.0, "very_high": 28.0},
+    "culture_change": {"low": 3.0, "mid": 8.0, "high": 15.0, "very_high": 24.0},
+}
+ 
+ 
+def _fallback_threshold_score(feature_dim: str, f: DimensionFeature) -> tuple[float, str]:
+    t = RUBRIC_FALLBACK_THRESHOLDS.get(feature_dim)
+    if not t:
+        return 50.0, "fallback default=50"
+ 
+    s = float(f.weighted_signal)
+    if s < t["low"]:
+        return 25.0, f"fallback weighted_signal={s:.2f} < low({t['low']})"
+    if s < t["mid"]:
+        return 50.0, f"fallback weighted_signal={s:.2f} < mid({t['mid']})"
+    if s < t["high"]:
+        return 75.0, f"fallback weighted_signal={s:.2f} < high({t['high']})"
+    if s < t["very_high"]:
+        return 90.0, f"fallback weighted_signal={s:.2f} < very_high({t['very_high']})"
+    return 100.0, f"fallback weighted_signal={s:.2f} >= very_high({t['very_high']})"
+ 
+ 
 def score_dimension_features(features: Dict[str, DimensionFeature]) -> List[DimensionScoreResult]:
     scorer = RubricScorer()
     results: List[DimensionScoreResult] = []
-
+ 
     for feature_dim in DIMENSIONS:
         f = features.get(feature_dim)
         if not f:
             results.append(_default_result(feature_dim))
             continue
-
+ 
         evidence_text = " ".join(f.top_keywords)
-        rr = scorer.score_dimension(feature_dim, evidence_text, {})
+        quant_metrics = _build_quant_metrics(feature_dim, f)
+        rr = scorer.score_dimension(feature_dim, evidence_text, quant_metrics)
+        score = clamp(float(rr.score), 0.0, 100.0)
+        reasons = [rr.rationale]
+ 
+        # When rubric keyword evidence is sparse, fall back to calibrated weighted-signal thresholds.
+        if rr.keyword_match_count == 0:
+            score, fallback_reason = _fallback_threshold_score(feature_dim, f)
+            reasons.append(fallback_reason)
+ 
         results.append(
             DimensionScoreResult(
                 dimension=f.dimension,
-                score=clamp(float(rr.score), 0.0, 100.0),
+                score=score,
                 confidence=clamp(float(rr.confidence), 0.0, 1.0),
                 evidence_count=int(f.evidence_count),
                 top_keywords=list(f.top_keywords),
-                reasons=[rr.rationale],
+                reasons=reasons,
             )
         )
-
+ 
     return results
+ 
+ 
+def score_dimensions(mapped: List[MappedEvidence]) -> List[DimensionScoreResult]:
+    """
+    Backward-compatible wrapper used by older scripts.
+    """
+    payloads = build_source_payloads(mapped)
+    features = map_sources_to_dimension_features(payloads)
+    return score_dimension_features(features)
+ 
+ 

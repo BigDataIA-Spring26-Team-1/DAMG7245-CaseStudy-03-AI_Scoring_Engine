@@ -1,9 +1,18 @@
+
+from __future__ import annotations
+
 import json
 import os
-from typing import Any, Dict
+import shlex
+import subprocess
+import sys
+from datetime import date
+from pathlib import Path
+from typing import Any
 
 import requests
 import streamlit as st
+
 
 # ============================================================
 # Config
@@ -11,6 +20,7 @@ import streamlit as st
 
 DEFAULT_API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
 DEFAULT_API_PREFIX = os.getenv("API_PREFIX", "/api/v1")
+DEFAULT_SCORING_PREFIX = os.getenv("SCORING_PREFIX", "/api/v1/scoring")
 
 ASSESSMENT_TYPES = ["screening", "due_diligence", "quarterly", "exit_prep"]
 ASSESSMENT_STATUSES = ["draft", "in_progress", "submitted", "approved", "superseded"]
@@ -24,7 +34,9 @@ DIMENSIONS = [
     "culture_change",
 ]
 
-DEFAULT_FILING_TYPES = ["10-K", "10-Q", "8-K"]
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = ROOT_DIR / "scripts"
+
 
 # ============================================================
 # HTTP helpers
@@ -41,8 +53,12 @@ def _api_url(base: str, prefix: str, path: str, include_prefix: bool = True) -> 
     return _join_url(base, path)
 
 
+def _scoring_url(base: str, scoring_prefix: str, path: str) -> str:
+    return _join_url(base, _join_url(scoring_prefix, path))
+
+
 def _request(method: str, url: str, **kwargs: Any) -> requests.Response:
-    timeout = kwargs.pop("timeout", 10)
+    timeout = kwargs.pop("timeout", 15)
     return requests.request(method, url, timeout=timeout, **kwargs)
 
 
@@ -60,302 +76,537 @@ def _show_http_error(exc: requests.HTTPError) -> None:
     if resp is None:
         st.error(f"Request failed: {exc}")
         return
+
     st.error(f"Request failed: {resp.status_code}")
-    if resp.text:
-        try:
-            st.json(resp.json())
-        except ValueError:
-            st.code(resp.text)
+    if not resp.text:
+        return
+
+    try:
+        st.json(resp.json())
+    except ValueError:
+        st.code(resp.text)
 
 
-def _show_response(resp: requests.Response) -> None:
-    st.write(f"Status: {resp.status_code}")
-    if resp.text:
-        try:
-            st.json(resp.json())
-        except ValueError:
-            st.code(resp.text)
-    else:
+def _show_payload(payload: Any) -> None:
+    if payload is None:
         st.info("No content")
+        return
+
+    if isinstance(payload, dict):
+        items = payload.get("items")
+        if isinstance(items, list):
+            meta = {k: v for k, v in payload.items() if k != "items"}
+            if meta:
+                st.json(meta)
+            st.dataframe(items, use_container_width=True)
+            return
+        st.json(payload)
+        return
+
+    if isinstance(payload, list):
+        if payload and all(isinstance(x, dict) for x in payload):
+            st.dataframe(payload, use_container_width=True)
+        else:
+            st.json(payload)
+        return
+
+    st.write(payload)
 
 
-def _json_editor(label: str, value: dict[str, Any]) -> dict[str, Any]:
-    text = st.text_area(label, value=json.dumps(value, indent=2))
+def _parse_json_input(label: str, text: str, allow_empty: bool = True) -> tuple[bool, Any]:
+    raw = text.strip()
+    if not raw and allow_empty:
+        return True, {}
     try:
-        return json.loads(text) if text.strip() else {}
-    except json.JSONDecodeError:
-        st.error("Invalid JSON")
-        return value
+        return True, json.loads(raw)
+    except json.JSONDecodeError as exc:
+        st.error(f"{label} has invalid JSON: {exc}")
+        return False, None
 
 
-def _pick_date(val: Any) -> str:
+def _build_headers(bearer_token: str, extra_headers_text: str) -> tuple[dict[str, str], str | None]:
+    headers: dict[str, str] = {}
+
+    token = bearer_token.strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    raw = extra_headers_text.strip()
+    if not raw:
+        return headers, None
+
     try:
-        return val.isoformat()
-    except Exception:
-        return str(val)
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return headers, f"Extra headers JSON is invalid: {exc}"
+
+    if not isinstance(parsed, dict):
+        return headers, "Extra headers JSON must be an object"
+
+    for key, value in parsed.items():
+        headers[str(key)] = str(value)
+
+    return headers, None
+
+
+def _list_repo_scripts() -> list[str]:
+    if not SCRIPTS_DIR.exists():
+        return []
+    return sorted([p.name for p in SCRIPTS_DIR.glob("*.py")])
+
+
+def _inject_ui_theme() -> None:
+    st.markdown(
+        """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap');
+
+:root {
+    --ui-ink: #17384f;
+    --ui-accent: #1473e6;
+    --ui-accent-soft: #43b8ff;
+    --ui-warm: #ff8a2b;
+    --ui-border: #cde2f7;
+    --ui-card: rgba(255, 255, 255, 0.85);
+}
+
+html, body, [class*="css"] {
+    font-family: "Manrope", "Segoe UI", "Trebuchet MS", sans-serif;
+    color: var(--ui-ink);
+}
+
+.stApp {
+    background:
+        radial-gradient(1000px 550px at 6% -10%, #d9ecff 0%, transparent 58%),
+        radial-gradient(1100px 700px at 96% -12%, #ffe4c2 0%, transparent 57%),
+        linear-gradient(180deg, #f4f9ff 0%, #fef8ef 100%);
+}
+
+[data-testid="stHeader"] {
+    background: transparent;
+}
+
+.block-container {
+    padding-top: 1rem;
+}
+
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #133750 0%, #1a5579 100%);
+}
+
+section[data-testid="stSidebar"] * {
+    color: #ecf5ff !important;
+}
+
+div[data-baseweb="tab-list"] {
+    gap: 0.35rem;
+    padding: 0.35rem;
+    border: 1px solid var(--ui-border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(6px);
+}
+
+button[data-baseweb="tab"] {
+    border-radius: 10px !important;
+    padding: 0.4rem 0.9rem !important;
+    font-weight: 700 !important;
+    color: #29506b !important;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+
+button[data-baseweb="tab"]:hover {
+    transform: translateY(-1px);
+}
+
+button[data-baseweb="tab"][aria-selected="true"] {
+    color: #ffffff !important;
+    background: linear-gradient(90deg, var(--ui-accent) 0%, #1f93ff 100%) !important;
+    box-shadow: 0 7px 16px rgba(20, 115, 230, 0.28);
+}
+
+div.stButton > button,
+div.stDownloadButton > button,
+div[data-testid="stForm"] button[kind] {
+    position: relative;
+    overflow: hidden;
+    border: 0;
+    border-radius: 12px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    color: #ffffff;
+    background: linear-gradient(135deg, var(--ui-accent) 0%, #1d8fff 60%, var(--ui-accent-soft) 100%);
+    box-shadow: 0 8px 22px rgba(20, 115, 230, 0.28);
+    transition: transform 0.18s ease, box-shadow 0.22s ease, filter 0.18s ease;
+}
+
+div.stButton > button:hover,
+div.stDownloadButton > button:hover,
+div[data-testid="stForm"] button[kind]:hover {
+    transform: translateY(-2px) scale(1.01);
+    box-shadow: 0 12px 28px rgba(20, 115, 230, 0.34);
+}
+
+div.stButton > button::after,
+div.stDownloadButton > button::after,
+div[data-testid="stForm"] button[kind]::after {
+    content: "";
+    position: absolute;
+    inset: -55%;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.62) 0%, rgba(255, 255, 255, 0) 68%);
+    opacity: 0;
+    transform: scale(0.4);
+    pointer-events: none;
+}
+
+div.stButton > button:active,
+div.stDownloadButton > button:active,
+div[data-testid="stForm"] button[kind]:active {
+    transform: scale(0.97);
+    animation: click-pop 0.33s ease, click-flash 0.5s ease;
+}
+
+div.stButton > button:active::after,
+div.stDownloadButton > button:active::after,
+div[data-testid="stForm"] button[kind]:active::after {
+    animation: click-ripple 0.55s ease-out;
+}
+
+div[data-testid="stDataFrame"],
+div[data-testid="stTable"] {
+    border: 1px solid var(--ui-border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 10px 24px rgba(13, 55, 89, 0.09);
+}
+
+div[data-testid="stMetric"] {
+    background: var(--ui-card);
+    border: 1px solid var(--ui-border);
+    border-radius: 12px;
+    box-shadow: 0 8px 20px rgba(13, 55, 89, 0.08);
+}
+
+div.stTextInput > div > div > input,
+div.stNumberInput > div > div > input,
+div.stTextArea textarea {
+    border-radius: 10px !important;
+    border: 1px solid #c9ddf3 !important;
+    background-color: rgba(255, 255, 255, 0.9) !important;
+}
+
+@keyframes click-pop {
+    0% { transform: scale(1); }
+    40% { transform: scale(0.93); }
+    100% { transform: scale(1); }
+}
+
+@keyframes click-flash {
+    0% { filter: brightness(1); }
+    25% { filter: brightness(1.3); }
+    100% { filter: brightness(1); }
+}
+
+@keyframes click-ripple {
+    0% { opacity: 0.55; transform: scale(0.35); }
+    100% { opacity: 0; transform: scale(1.75); }
+}
+
+@keyframes section-fade {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+[data-testid="stVerticalBlock"] > div {
+    animation: section-fade 0.34s ease-out both;
+}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
-# UI
+# UI setup
 # ============================================================
 
 st.set_page_config(page_title="PE OrgAIR Platform", layout="wide")
+_inject_ui_theme()
 st.title("PE OrgAIR Platform")
+st.caption("Comprehensive Streamlit console for all current API routers and local scripts.")
 
 with st.sidebar:
-    st.header("API Settings")
+    st.header("Connection")
     api_base = st.text_input("API Base URL", value=DEFAULT_API_BASE)
     api_prefix = st.text_input("API Prefix", value=DEFAULT_API_PREFIX)
-    timeout = st.number_input("Timeout (seconds)", min_value=1, max_value=120, value=10)
+    scoring_prefix = st.text_input("Scoring Prefix", value=DEFAULT_SCORING_PREFIX)
+    timeout = st.number_input("HTTP Timeout (seconds)", min_value=1, max_value=300, value=20)
+    verify_tls = st.checkbox("Verify TLS certificates", value=True)
 
     st.divider()
-    st.caption("Notes")
-    st.write("- Health routes are not prefixed")
-    st.write("- Everything else uses API prefix (default /api/v1)")
+    st.header("Optional Auth")
+    bearer_token = st.text_input("Bearer Token", value="", type="password")
+    extra_headers_text = st.text_area("Extra Headers JSON", value="{}", height=100)
 
-st.divider()
+    headers, headers_error = _build_headers(bearer_token, extra_headers_text)
+    if headers_error:
+        st.error(headers_error)
+
+    st.divider()
+    st.caption("Routing notes")
+    st.write("- Health endpoints do not use API prefix")
+    st.write("- Scoring routes use the dedicated scoring prefix")
+
+
+# ============================================================
+# Tabs
+# ============================================================
+
+main_tabs = st.tabs(
+    [
+        "Health",
+        "Companies",
+        "Assessments",
+        "Collection",
+        "Documents & Chunks",
+        "Signals",
+        "Signal Summaries",
+        "Evidence",
+        "Scoring",
+        "Scripts",
+        "Raw API",
+    ]
+)
+
 
 # ============================================================
 # Health
 # ============================================================
 
-health_col, info_col = st.columns([2, 3])
-with health_col:
-    st.subheader("Health")
-    if st.button("GET /health"):
-        try:
-            url = _api_url(api_base, api_prefix, "/health", include_prefix=False)
-            data = _request_json("GET", url, timeout=timeout)
-            st.success("OK")
-            st.json(data)
-        except requests.HTTPError as exc:
-            _show_http_error(exc)
-        except Exception as exc:
-            st.error(f"Health check failed: {exc}")
-
-    if st.button("GET /health/detailed"):
-        try:
-            url = _api_url(api_base, api_prefix, "/health/detailed", include_prefix=False)
-            data = _request_json("GET", url, timeout=timeout)
-            st.success("OK")
-            st.json(data)
-        except requests.HTTPError as exc:
-            _show_http_error(exc)
-        except Exception as exc:
-            st.error(f"Detailed health check failed: {exc}")
-
-with info_col:
-    st.subheader("Quick Notes")
-    st.write("Use the tabs below for Case Study 1 (Companies/Assessments) and Case Study 2 (Evidence/Signals).")
-
-st.divider()
-
-# ============================================================
-# Main tabs: CS1 + CS2
-# ============================================================
-
-main_tabs = st.tabs(["Companies", "Assessments", "Documents", "Signals", "Evidence"])
-
-# ============================================================
-# CS1: Companies
-# ============================================================
-
 with main_tabs[0]:
-    st.subheader("Companies")
-    # FIXED: tab labels now match content
-    company_tabs = st.tabs(["List", "Get", "Create", "Update", "Delete"])
+    col1, col2 = st.columns(2)
 
-    with company_tabs[0]:
-        page = st.number_input("Page", min_value=1, value=1, key="companies_list_page")
-        page_size = st.number_input(
-            "Page Size", min_value=1, max_value=100, value=20, key="companies_list_size"
-        )
-        if st.button("GET /companies"):
+    with col1:
+        if st.button("GET /health", key="health_simple"):
+            try:
+                url = _api_url(api_base, api_prefix, "/health", include_prefix=False)
+                payload = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(payload)
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"Health check failed: {exc}")
+
+    with col2:
+        if st.button("GET /health/detailed", key="health_detailed"):
+            try:
+                url = _api_url(api_base, api_prefix, "/health/detailed", include_prefix=False)
+                payload = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(payload)
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"Detailed health check failed: {exc}")
+
+# ============================================================
+# Companies
+# ============================================================
+
+with main_tabs[1]:
+    tabs = st.tabs(["List", "Industries", "Get", "Create", "Update", "Delete"])
+
+    with tabs[0]:
+        page = st.number_input("Page", min_value=1, value=1, key="companies_page")
+        page_size = st.number_input("Page Size", min_value=1, max_value=100, value=20, key="companies_page_size")
+        if st.button("GET /companies", key="companies_list_btn"):
             try:
                 url = _api_url(api_base, api_prefix, "/companies")
-                data = _request_json(
+                payload = _request_json(
                     "GET",
                     url,
                     params={"page": int(page), "page_size": int(page_size)},
                     timeout=timeout,
+                    headers=headers,
+                    verify=verify_tls,
                 )
-                st.write(f"Total: {data.get('total', 'n/a')}")
-                st.dataframe(data.get("items", []), use_container_width=True)
+                _show_payload(payload)
             except requests.HTTPError as exc:
                 _show_http_error(exc)
             except Exception as exc:
                 st.error(f"List companies failed: {exc}")
 
-    with company_tabs[1]:
-        company_id = st.text_input("Company ID", key="company_get_id")
-        if st.button("GET /companies/{id}"):
+    with tabs[1]:
+        if st.button("GET /companies/industries", key="companies_industries_btn"):
+            try:
+                url = _api_url(api_base, api_prefix, "/companies/industries")
+                payload = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(payload)
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"List industries failed: {exc}")
+
+    with tabs[2]:
+        company_id = st.text_input("Company ID", key="companies_get_id")
+        if st.button("GET /companies/{company_id}", key="companies_get_btn"):
             if not company_id.strip():
-                st.error("Company ID is required.")
+                st.error("Company ID is required")
             else:
                 try:
                     url = _api_url(api_base, api_prefix, f"/companies/{company_id.strip()}")
-                    data = _request_json("GET", url, timeout=timeout)
-                    st.json(data)
+                    payload = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(payload)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
                     st.error(f"Get company failed: {exc}")
 
-    with company_tabs[2]:
-        with st.form("company_create"):
+    with tabs[3]:
+        with st.form("companies_create_form"):
             name = st.text_input("Name")
-            ticker = st.text_input("Ticker (optional, uppercase)")
+            ticker = st.text_input("Ticker (uppercase, optional)")
             industry_id = st.text_input("Industry ID (optional)")
-            position_factor = st.number_input(
-                "Position Factor", min_value=-1.0, max_value=1.0, value=0.0, step=0.01
-            )
+            position_factor = st.number_input("Position Factor", min_value=-1.0, max_value=1.0, value=0.0, step=0.01)
             submitted = st.form_submit_button("POST /companies")
 
         if submitted:
             if not name.strip():
-                st.error("Name is required.")
+                st.error("Name is required")
             else:
-                payload = {"name": name.strip(), "position_factor": float(position_factor)}
+                payload: dict[str, Any] = {
+                    "name": name.strip(),
+                    "position_factor": float(position_factor),
+                }
                 if ticker.strip():
-                    payload["ticker"] = ticker.strip()
+                    payload["ticker"] = ticker.strip().upper()
                 if industry_id.strip():
                     payload["industry_id"] = industry_id.strip()
+
                 try:
                     url = _api_url(api_base, api_prefix, "/companies")
-                    data = _request_json("POST", url, json=payload, timeout=timeout)
-                    st.success("Company created")
-                    st.json(data)
+                    out = _request_json("POST", url, json=payload, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
                     st.error(f"Create company failed: {exc}")
 
-    with company_tabs[3]:
-        with st.form("company_update"):
+    with tabs[4]:
+        with st.form("companies_update_form"):
             update_id = st.text_input("Company ID")
             update_name = st.text_input("Name (optional)")
-            update_ticker = st.text_input("Ticker (optional, uppercase)")
-            update_industry_id = st.text_input("Industry ID (optional)")
+            update_ticker = st.text_input("Ticker (optional)")
+            update_industry = st.text_input("Industry ID (optional)")
             include_position = st.checkbox("Include position_factor", value=False)
-            update_position = st.number_input(
-                "Position Factor", min_value=-1.0, max_value=1.0, value=0.0, step=0.01
-            )
-            submitted_update = st.form_submit_button("PUT /companies/{id}")
+            update_position = st.number_input("Position Factor", min_value=-1.0, max_value=1.0, value=0.0, step=0.01)
+            submitted_update = st.form_submit_button("PUT /companies/{company_id}")
 
         if submitted_update:
             if not update_id.strip():
-                st.error("Company ID is required.")
+                st.error("Company ID is required")
             else:
                 payload: dict[str, Any] = {}
                 if update_name.strip():
                     payload["name"] = update_name.strip()
                 if update_ticker.strip():
-                    payload["ticker"] = update_ticker.strip()
-                if update_industry_id.strip():
-                    payload["industry_id"] = update_industry_id.strip()
+                    payload["ticker"] = update_ticker.strip().upper()
+                if update_industry.strip():
+                    payload["industry_id"] = update_industry.strip()
                 if include_position:
                     payload["position_factor"] = float(update_position)
+
                 if not payload:
-                    st.error("Provide at least one field to update.")
+                    st.error("Provide at least one field to update")
                 else:
                     try:
                         url = _api_url(api_base, api_prefix, f"/companies/{update_id.strip()}")
-                        data = _request_json("PUT", url, json=payload, timeout=timeout)
-                        st.success("Company updated")
-                        st.json(data)
+                        out = _request_json("PUT", url, json=payload, timeout=timeout, headers=headers, verify=verify_tls)
+                        _show_payload(out)
                     except requests.HTTPError as exc:
                         _show_http_error(exc)
                     except Exception as exc:
                         st.error(f"Update company failed: {exc}")
 
-    with company_tabs[4]:
-        delete_id = st.text_input("Company ID", key="company_delete_id")
-        if st.button("DELETE /companies/{id}"):
+    with tabs[5]:
+        delete_id = st.text_input("Company ID", key="companies_delete_id")
+        if st.button("DELETE /companies/{company_id}", key="companies_delete_btn"):
             if not delete_id.strip():
-                st.error("Company ID is required.")
+                st.error("Company ID is required")
             else:
                 try:
                     url = _api_url(api_base, api_prefix, f"/companies/{delete_id.strip()}")
-                    resp = _request("DELETE", url, timeout=timeout)
+                    resp = _request("DELETE", url, timeout=timeout, headers=headers, verify=verify_tls)
                     if not resp.ok:
                         raise requests.HTTPError(resp.text, response=resp)
-                    st.success("Company deleted")
-                    _show_response(resp)
+                    st.success(f"Deleted ({resp.status_code})")
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
                     st.error(f"Delete company failed: {exc}")
 
+
 # ============================================================
-# CS1: Assessments
+# Assessments
 # ============================================================
 
-with main_tabs[1]:
-    st.subheader("Assessments")
-    # FIXED: tab labels now match content
-    assessment_tabs = st.tabs(["List", "Get", "Create", "Update Status", "Scores"])
+with main_tabs[2]:
+    tabs = st.tabs(["List", "Get", "Create", "Update Status", "List Scores", "Upsert Score"])
 
-    with assessment_tabs[0]:
-        a_page = st.number_input("Page", min_value=1, value=1, key="assess_list_page")
-        a_page_size = st.number_input(
-            "Page Size", min_value=1, max_value=100, value=20, key="assess_list_size"
-        )
-        a_company_id = st.text_input("Company ID filter (optional)", key="assess_list_company")
-        if st.button("GET /assessments"):
+    with tabs[0]:
+        page = st.number_input("Page", min_value=1, value=1, key="assessments_page")
+        page_size = st.number_input("Page Size", min_value=1, max_value=100, value=20, key="assessments_page_size")
+        company_id = st.text_input("Company ID filter (optional)", key="assessments_filter_company")
+        if st.button("GET /assessments", key="assessments_list_btn"):
             try:
+                params: dict[str, Any] = {"page": int(page), "page_size": int(page_size)}
+                if company_id.strip():
+                    params["company_id"] = company_id.strip()
                 url = _api_url(api_base, api_prefix, "/assessments")
-                params = {"page": int(a_page), "page_size": int(a_page_size)}
-                if a_company_id.strip():
-                    params["company_id"] = a_company_id.strip()
-                data = _request_json("GET", url, params=params, timeout=timeout)
-                st.write(f"Total: {data.get('total', 'n/a')}")
-                st.dataframe(data.get("items", []), use_container_width=True)
+                payload = _request_json("GET", url, params=params, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(payload)
             except requests.HTTPError as exc:
                 _show_http_error(exc)
             except Exception as exc:
                 st.error(f"List assessments failed: {exc}")
 
-    with assessment_tabs[1]:
-        assessment_id = st.text_input("Assessment ID", key="assess_get_id")
-        if st.button("GET /assessments/{id}"):
+    with tabs[1]:
+        assessment_id = st.text_input("Assessment ID", key="assessments_get_id")
+        if st.button("GET /assessments/{id}", key="assessments_get_btn"):
             if not assessment_id.strip():
-                st.error("Assessment ID is required.")
+                st.error("Assessment ID is required")
             else:
                 try:
                     url = _api_url(api_base, api_prefix, f"/assessments/{assessment_id.strip()}")
-                    data = _request_json("GET", url, timeout=timeout)
-                    st.json(data)
+                    payload = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(payload)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
                     st.error(f"Get assessment failed: {exc}")
 
-    with assessment_tabs[2]:
-        with st.form("assess_create"):
+    with tabs[2]:
+        with st.form("assessments_create_form"):
             create_company_id = st.text_input("Company ID")
             assessment_type = st.selectbox("Assessment Type", ASSESSMENT_TYPES)
-            assessment_date = st.date_input("Assessment Date")
+            assessment_date = st.date_input("Assessment Date", value=date.today())
             primary_assessor = st.text_input("Primary Assessor (optional)")
             secondary_assessor = st.text_input("Secondary Assessor (optional)")
-            include_vr = st.checkbox("Include VR Score", value=False)
+            include_vr = st.checkbox("Include VR score", value=False)
             vr_score = st.number_input("VR Score", min_value=0.0, max_value=100.0, value=50.0)
-            include_conf = st.checkbox("Include Confidence Bounds", value=False)
-            confidence_lower = st.number_input(
-                "Confidence Lower", min_value=0.0, max_value=100.0, value=50.0
-            )
-            confidence_upper = st.number_input(
-                "Confidence Upper", min_value=0.0, max_value=100.0, value=60.0
-            )
-            submitted_assessment = st.form_submit_button("POST /assessments")
+            include_bounds = st.checkbox("Include confidence bounds", value=False)
+            conf_lower = st.number_input("Confidence Lower", min_value=0.0, max_value=100.0, value=40.0)
+            conf_upper = st.number_input("Confidence Upper", min_value=0.0, max_value=100.0, value=60.0)
+            submitted = st.form_submit_button("POST /assessments")
 
-        if submitted_assessment:
+        if submitted:
             if not create_company_id.strip():
-                st.error("Company ID is required.")
+                st.error("Company ID is required")
             else:
-                payload = {
+                payload: dict[str, Any] = {
                     "company_id": create_company_id.strip(),
                     "assessment_type": assessment_type,
-                    "assessment_date": _pick_date(assessment_date),
+                    "assessment_date": assessment_date.isoformat(),
                 }
                 if primary_assessor.strip():
                     payload["primary_assessor"] = primary_assessor.strip()
@@ -363,395 +614,619 @@ with main_tabs[1]:
                     payload["secondary_assessor"] = secondary_assessor.strip()
                 if include_vr:
                     payload["vr_score"] = float(vr_score)
-                if include_conf:
-                    payload["confidence_lower"] = float(confidence_lower)
-                    payload["confidence_upper"] = float(confidence_upper)
+                if include_bounds:
+                    payload["confidence_lower"] = float(conf_lower)
+                    payload["confidence_upper"] = float(conf_upper)
 
                 try:
                     url = _api_url(api_base, api_prefix, "/assessments")
-                    data = _request_json("POST", url, json=payload, timeout=timeout)
-                    st.success("Assessment created")
-                    st.json(data)
+                    out = _request_json("POST", url, json=payload, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
                     st.error(f"Create assessment failed: {exc}")
 
-    with assessment_tabs[3]:
-        with st.form("assess_status"):
-            status_assessment_id = st.text_input("Assessment ID")
-            new_status = st.selectbox("New Status", ASSESSMENT_STATUSES)
-            submitted_status = st.form_submit_button("PATCH /assessments/{id}/status")
+    with tabs[3]:
+        with st.form("assessments_status_form"):
+            update_assessment_id = st.text_input("Assessment ID")
+            status_value = st.selectbox("New Status", ASSESSMENT_STATUSES)
+            submitted = st.form_submit_button("PATCH /assessments/{id}/status")
 
-        if submitted_status:
-            if not status_assessment_id.strip():
-                st.error("Assessment ID is required.")
+        if submitted:
+            if not update_assessment_id.strip():
+                st.error("Assessment ID is required")
             else:
-                payload = {"status": new_status}
                 try:
-                    url = _api_url(
-                        api_base, api_prefix, f"/assessments/{status_assessment_id.strip()}/status"
+                    url = _api_url(api_base, api_prefix, f"/assessments/{update_assessment_id.strip()}/status")
+                    out = _request_json(
+                        "PATCH",
+                        url,
+                        json={"status": status_value},
+                        timeout=timeout,
+                        headers=headers,
+                        verify=verify_tls,
                     )
-                    data = _request_json("PATCH", url, json=payload, timeout=timeout)
-                    st.success("Status updated")
-                    st.json(data)
+                    _show_payload(out)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
                     st.error(f"Update status failed: {exc}")
 
-    with assessment_tabs[4]:
-        score_tabs = st.tabs(["List Scores", "Upsert Score", "Raw JSON"])
+    with tabs[4]:
+        assessment_id = st.text_input("Assessment ID", key="assessments_scores_id")
+        page = st.number_input("Page", min_value=1, value=1, key="assessments_scores_page")
+        page_size = st.number_input("Page Size", min_value=1, max_value=100, value=20, key="assessments_scores_page_size")
+        if st.button("GET /assessments/{id}/scores", key="assessments_scores_btn"):
+            if not assessment_id.strip():
+                st.error("Assessment ID is required")
+            else:
+                try:
+                    url = _api_url(api_base, api_prefix, f"/assessments/{assessment_id.strip()}/scores")
+                    out = _request_json(
+                        "GET",
+                        url,
+                        params={"page": int(page), "page_size": int(page_size)},
+                        timeout=timeout,
+                        headers=headers,
+                        verify=verify_tls,
+                    )
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"List dimension scores failed: {exc}")
 
-        with score_tabs[0]:
-            scores_assessment_id = st.text_input("Assessment ID", key="scores_list_id")
-            scores_page = st.number_input("Page", min_value=1, value=1, key="scores_list_page")
-            scores_page_size = st.number_input(
-                "Page Size", min_value=1, max_value=100, value=20, key="scores_list_size"
-            )
-            if st.button("GET /assessments/{id}/scores"):
-                if not scores_assessment_id.strip():
-                    st.error("Assessment ID is required.")
-                else:
-                    try:
-                        url = _api_url(
-                            api_base,
-                            api_prefix,
-                            f"/assessments/{scores_assessment_id.strip()}/scores",
-                        )
-                        data = _request_json(
-                            "GET",
-                            url,
-                            params={"page": int(scores_page), "page_size": int(scores_page_size)},
-                            timeout=timeout,
-                        )
-                        st.write(f"Total: {data.get('total', 'n/a')}")
-                        st.dataframe(data.get("items", []), use_container_width=True)
-                    except requests.HTTPError as exc:
-                        _show_http_error(exc)
-                    except Exception as exc:
-                        st.error(f"Fetch scores failed: {exc}")
-
-        with score_tabs[1]:
-            with st.form("scores_upsert"):
-                upsert_assessment_id = st.text_input("Assessment ID", key="scores_upsert_id")
-                dimension = st.selectbox("Dimension", DIMENSIONS)
-                score = st.number_input("Score", min_value=0.0, max_value=100.0, value=50.0)
-                include_weight = st.checkbox("Include Weight", value=False)
-                weight = st.number_input("Weight", min_value=0.0, max_value=1.0, value=0.2)
-                confidence = st.slider("Confidence", min_value=0.0, max_value=1.0, value=0.8)
-                evidence_count = st.number_input("Evidence Count", min_value=0, value=0)
-                submitted_score = st.form_submit_button("POST /assessments/{id}/scores")
-
-            if submitted_score:
-                if not upsert_assessment_id.strip():
-                    st.error("Assessment ID is required.")
-                else:
-                    payload = {
-                        "assessment_id": upsert_assessment_id.strip(),
-                        "dimension": dimension,
-                        "score": float(score),
-                        "confidence": float(confidence),
-                        "evidence_count": int(evidence_count),
-                    }
-                    if include_weight:
-                        payload["weight"] = float(weight)
-                    try:
-                        url = _api_url(
-                            api_base, api_prefix, f"/assessments/{upsert_assessment_id.strip()}/scores"
-                        )
-                        data = _request_json("POST", url, json=payload, timeout=timeout)
-                        st.success("Score upserted")
-                        st.json(data)
-                    except requests.HTTPError as exc:
-                        _show_http_error(exc)
-                    except Exception as exc:
-                        st.error(f"Upsert score failed: {exc}")
-
-        with score_tabs[2]:
-            st.caption("Use this for custom payloads. Path uses prefix.")
-            raw_assessment_id = st.text_input("Assessment ID", key="scores_raw_id")
-            payload = _json_editor(
-                "Payload",
-                {
-                    "assessment_id": "<uuid>",
-                    "dimension": "data_infrastructure",
-                    "score": 50,
-                    "confidence": 0.8,
-                    "evidence_count": 0,
-                },
-            )
-            if st.button("POST Raw to /assessments/{id}/scores"):
-                if not raw_assessment_id.strip():
-                    st.error("Assessment ID is required.")
-                else:
-                    try:
-                        url = _api_url(
-                            api_base, api_prefix, f"/assessments/{raw_assessment_id.strip()}/scores"
-                        )
-                        data = _request_json("POST", url, json=payload, timeout=timeout)
-                        st.success("Score upserted")
-                        st.json(data)
-                    except requests.HTTPError as exc:
-                        _show_http_error(exc)
-                    except Exception as exc:
-                        st.error(f"Raw upsert failed: {exc}")
-
-# ============================================================
-# CS2: Documents
-# ============================================================
-
-with main_tabs[2]:
-    st.subheader("Documents")
-    doc_tabs = st.tabs(["Collect", "List", "Get", "Get Chunks"])
-
-    with doc_tabs[0]:
-        st.caption("Triggers document collection for a company (runs server-side).")
-        with st.form("doc_collect_form"):
-            company_id = st.text_input("Company ID (UUID)", key="doc_collect_company_id")
-            filing_types = st.multiselect(
-                "Filing types", DEFAULT_FILING_TYPES, default=DEFAULT_FILING_TYPES
-            )
-            years_back = st.number_input("Years back", min_value=1, max_value=10, value=3)
-            submitted = st.form_submit_button("POST /documents/collect")
+    with tabs[5]:
+        with st.form("assessments_upsert_score_form"):
+            score_assessment_id = st.text_input("Assessment ID")
+            score_dimension = st.selectbox("Dimension", DIMENSIONS)
+            score_value = st.number_input("Score", min_value=0.0, max_value=100.0, value=50.0)
+            include_weight = st.checkbox("Include weight", value=False)
+            weight_value = st.number_input("Weight", min_value=0.0, max_value=1.0, value=0.15)
+            confidence_value = st.slider("Confidence", min_value=0.0, max_value=1.0, value=0.8)
+            evidence_count = st.number_input("Evidence Count", min_value=0, value=0)
+            submitted = st.form_submit_button("POST /assessments/{id}/scores")
 
         if submitted:
-            if not company_id.strip():
-                st.error("Company ID is required.")
+            if not score_assessment_id.strip():
+                st.error("Assessment ID is required")
             else:
-                payload = {
-                    "company_id": company_id.strip(),
-                    "filing_types": filing_types,
-                    "years_back": int(years_back),
+                payload: dict[str, Any] = {
+                    "assessment_id": score_assessment_id.strip(),
+                    "dimension": score_dimension,
+                    "score": float(score_value),
+                    "confidence": float(confidence_value),
+                    "evidence_count": int(evidence_count),
                 }
+                if include_weight:
+                    payload["weight"] = float(weight_value)
+
                 try:
-                    url = _api_url(api_base, api_prefix, "/documents/collect")
-                    data = _request_json("POST", url, json=payload, timeout=timeout)
-                    st.success("Queued")
-                    st.json(data)
+                    url = _api_url(api_base, api_prefix, f"/assessments/{score_assessment_id.strip()}/scores")
+                    out = _request_json("POST", url, json=payload, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
-                    st.error(f"Collect documents failed: {exc}")
-
-    with doc_tabs[1]:
-        st.caption("List documents (optionally filter by company and filing type).")
-        company_id = st.text_input("Company ID filter (optional)", key="doc_list_company_id")
-        filing_type = st.selectbox("Filing type filter (optional)", [""] + DEFAULT_FILING_TYPES, index=0)
-        limit = st.number_input("Limit", min_value=1, max_value=1000, value=200, key="doc_list_limit")
-        if st.button("GET /documents"):
-            try:
-                url = _api_url(api_base, api_prefix, "/documents")
-                params: Dict[str, Any] = {"limit": int(limit)}
-                if company_id.strip():
-                    params["company_id"] = company_id.strip()
-                if filing_type.strip():
-                    params["filing_type"] = filing_type.strip()
-                data = _request_json("GET", url, params=params, timeout=timeout)
-                items = data.get("items") if isinstance(data, dict) else data
-                st.dataframe(items or [], use_container_width=True)
-            except requests.HTTPError as exc:
-                _show_http_error(exc)
-            except Exception as exc:
-                st.error(f"List documents failed: {exc}")
-
-    with doc_tabs[2]:
-        document_id = st.text_input("Document ID", key="doc_get_id")
-        if st.button("GET /documents/{id}"):
-            if not document_id.strip():
-                st.error("Document ID is required.")
-            else:
-                try:
-                    url = _api_url(api_base, api_prefix, f"/documents/{document_id.strip()}")
-                    data = _request_json("GET", url, timeout=timeout)
-                    st.json(data)
-                except requests.HTTPError as exc:
-                    _show_http_error(exc)
-                except Exception as exc:
-                    st.error(f"Get document failed: {exc}")
-
-    with doc_tabs[3]:
-        document_id = st.text_input("Document ID", key="doc_chunks_id")
-        limit = st.number_input(
-            "Limit", min_value=1, max_value=1000, value=200, key="doc_chunks_limit"
-        )
-        if st.button("GET /documents/{id}/chunks"):
-            if not document_id.strip():
-                st.error("Document ID is required.")
-            else:
-                try:
-                    url = _api_url(api_base, api_prefix, f"/documents/{document_id.strip()}/chunks")
-                    data = _request_json("GET", url, params={"limit": int(limit)}, timeout=timeout)
-                    items = data.get("items") if isinstance(data, dict) else data
-                    st.dataframe(items or [], use_container_width=True)
-                except requests.HTTPError as exc:
-                    _show_http_error(exc)
-                except Exception as exc:
-                    st.error(f"Get document chunks failed: {exc}")
+                    st.error(f"Upsert score failed: {exc}")
 
 # ============================================================
-# CS2: Signals
+# Collection
 # ============================================================
 
 with main_tabs[3]:
-    st.subheader("Signals")
-    # FIXED: labels match the logic in your handlers
-    sig_tabs = st.tabs(["Collect", "List", "Company Summary", "Company By Category", "Get by ID"])
+    tabs = st.tabs(["Collect Evidence", "Collect Signals", "Task Status"])
 
-    with sig_tabs[0]:
-        st.caption("Triggers signal collection for a company.")
-        with st.form("signals_collect_form"):
-            company_id = st.text_input("Company ID (UUID)", key="sig_collect_company_id")
-            submitted = st.form_submit_button("POST /signals/collect")
+    with tabs[0]:
+        with st.form("collection_evidence_form"):
+            companies = st.text_input("Tickers (comma-separated) or 'all'", value="all")
+            submitted = st.form_submit_button("POST /collection/evidence")
 
         if submitted:
-            if not company_id.strip():
-                st.error("Company ID is required.")
+            if not companies.strip():
+                st.error("companies is required")
             else:
-                payload = {"company_id": company_id.strip()}
                 try:
-                    url = _api_url(api_base, api_prefix, "/signals/collect")
-                    data = _request_json("POST", url, json=payload, timeout=timeout)
-                    st.success("Queued")
-                    st.json(data)
+                    url = _api_url(api_base, api_prefix, "/collection/evidence")
+                    out = _request_json(
+                        "POST",
+                        url,
+                        params={"companies": companies.strip()},
+                        timeout=timeout,
+                        headers=headers,
+                        verify=verify_tls,
+                    )
+                    if isinstance(out, dict) and out.get("task_id"):
+                        st.session_state["last_collection_task_id"] = out["task_id"]
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"Collect evidence failed: {exc}")
+
+    with tabs[1]:
+        with st.form("collection_signals_form"):
+            companies = st.text_input("Tickers (comma-separated) or 'all'", value="all", key="collection_signals_companies")
+            submitted = st.form_submit_button("POST /collection/signals")
+
+        if submitted:
+            if not companies.strip():
+                st.error("companies is required")
+            else:
+                try:
+                    url = _api_url(api_base, api_prefix, "/collection/signals")
+                    out = _request_json(
+                        "POST",
+                        url,
+                        params={"companies": companies.strip()},
+                        timeout=timeout,
+                        headers=headers,
+                        verify=verify_tls,
+                    )
+                    if isinstance(out, dict) and out.get("task_id"):
+                        st.session_state["last_collection_task_id"] = out["task_id"]
+                    _show_payload(out)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
                     st.error(f"Collect signals failed: {exc}")
 
-    with sig_tabs[1]:
-        st.caption("List signals (filterable by company_id, ticker, type, source).")
-        company_id = st.text_input("Company ID filter (optional)", key="sig_list_company_id")
-        ticker = st.text_input("Ticker filter (optional)", key="sig_list_ticker")
-        signal_type = st.text_input(
-            "Signal type filter (optional) e.g. news/jobs/tech/patents", key="sig_list_type"
-        )
-        source = st.text_input("Source filter (optional)", key="sig_list_source")
-        limit = st.number_input("Limit", min_value=1, max_value=1000, value=200, key="sig_list_limit")
-        if st.button("GET /signals"):
+    with tabs[2]:
+        default_task = st.session_state.get("last_collection_task_id", "")
+        task_id = st.text_input("Task ID", value=default_task)
+        if st.button("GET /collection/tasks/{task_id}", key="collection_task_status_btn"):
+            if not task_id.strip():
+                st.error("Task ID is required")
+            else:
+                try:
+                    url = _api_url(api_base, api_prefix, f"/collection/tasks/{task_id.strip()}")
+                    out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"Get task status failed: {exc}")
+
+
+# ============================================================
+# Documents & Chunks
+# ============================================================
+
+with main_tabs[4]:
+    tabs = st.tabs(["List Documents", "Get Document", "List Chunks", "Get Chunk"])
+
+    with tabs[0]:
+        ticker = st.text_input("Ticker filter (optional)", key="documents_list_ticker")
+        company_id = st.text_input("Company ID filter (optional)", key="documents_list_company")
+        limit = st.number_input("Limit", min_value=1, max_value=500, value=100, key="documents_list_limit")
+        offset = st.number_input("Offset", min_value=0, value=0, key="documents_list_offset")
+        if st.button("GET /documents", key="documents_list_btn"):
             try:
-                url = _api_url(api_base, api_prefix, "/signals")
-                params: Dict[str, Any] = {"limit": int(limit)}
+                params: dict[str, Any] = {"limit": int(limit), "offset": int(offset)}
+                if ticker.strip():
+                    params["ticker"] = ticker.strip().upper()
                 if company_id.strip():
                     params["company_id"] = company_id.strip()
+                url = _api_url(api_base, api_prefix, "/documents")
+                out = _request_json("GET", url, params=params, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(out)
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"List documents failed: {exc}")
+
+    with tabs[1]:
+        document_id = st.text_input("Document ID", key="documents_get_id")
+        if st.button("GET /documents/{document_id}", key="documents_get_btn"):
+            if not document_id.strip():
+                st.error("Document ID is required")
+            else:
+                try:
+                    url = _api_url(api_base, api_prefix, f"/documents/{document_id.strip()}")
+                    out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"Get document failed: {exc}")
+
+    with tabs[2]:
+        document_id = st.text_input("Document ID", key="chunks_list_document_id")
+        limit = st.number_input("Limit", min_value=1, max_value=1000, value=200, key="chunks_list_limit")
+        offset = st.number_input("Offset", min_value=0, value=0, key="chunks_list_offset")
+        if st.button("GET /chunks/?document_id=...", key="chunks_list_btn"):
+            if not document_id.strip():
+                st.error("Document ID is required")
+            else:
+                try:
+                    url = _api_url(api_base, api_prefix, "/chunks/")
+                    out = _request_json(
+                        "GET",
+                        url,
+                        params={"document_id": document_id.strip(), "limit": int(limit), "offset": int(offset)},
+                        timeout=timeout,
+                        headers=headers,
+                        verify=verify_tls,
+                    )
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"List chunks failed: {exc}")
+
+    with tabs[3]:
+        chunk_id = st.text_input("Chunk ID", key="chunks_get_id")
+        if st.button("GET /chunks/{chunk_id}", key="chunks_get_btn"):
+            if not chunk_id.strip():
+                st.error("Chunk ID is required")
+            else:
+                try:
+                    url = _api_url(api_base, api_prefix, f"/chunks/{chunk_id.strip()}")
+                    out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"Get chunk failed: {exc}")
+
+
+# ============================================================
+# Signals
+# ============================================================
+
+with main_tabs[5]:
+    tabs = st.tabs(["List", "Get"])
+
+    with tabs[0]:
+        ticker = st.text_input("Ticker (optional)", key="signals_list_ticker")
+        signal_type = st.text_input("Signal Type (optional)", key="signals_list_type")
+        source = st.text_input("Source (optional)", key="signals_list_source")
+        limit = st.number_input("Limit", min_value=1, max_value=500, value=100, key="signals_list_limit")
+        if st.button("GET /signals", key="signals_list_btn"):
+            try:
+                params: dict[str, Any] = {"limit": int(limit)}
                 if ticker.strip():
-                    params["ticker"] = ticker.strip()
+                    params["ticker"] = ticker.strip().upper()
                 if signal_type.strip():
-                    params["signal_type"] = signal_type.strip()
+                    params["signal_type"] = signal_type.strip().lower()
                 if source.strip():
-                    params["source"] = source.strip()
-                data = _request_json("GET", url, params=params, timeout=timeout)
-                items = data.get("items") if isinstance(data, dict) else data
-                st.dataframe(items or [], use_container_width=True)
+                    params["source"] = source.strip().lower()
+                url = _api_url(api_base, api_prefix, "/signals")
+                out = _request_json("GET", url, params=params, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(out)
             except requests.HTTPError as exc:
                 _show_http_error(exc)
             except Exception as exc:
                 st.error(f"List signals failed: {exc}")
 
-    with sig_tabs[2]:
-        st.caption("Get signal summary for a company.")
-        company_id = st.text_input("Company ID (UUID)", key="sig_company_summary_id")
-        if st.button("GET /companies/{id}/signals"):
-            if not company_id.strip():
-                st.error("Company ID is required.")
-            else:
-                try:
-                    url = _api_url(api_base, api_prefix, f"/companies/{company_id.strip()}/signals")
-                    data = _request_json("GET", url, timeout=timeout)
-                    st.json(data)
-                except requests.HTTPError as exc:
-                    _show_http_error(exc)
-                except Exception as exc:
-                    st.error(f"Get company signal summary failed: {exc}")
-
-    with sig_tabs[3]:
-        st.caption("Get signals for a company by category.")
-        company_id = st.text_input("Company ID (UUID)", key="sig_company_bycat_id")
-        category = st.text_input(
-            "Category (e.g. technology_hiring / innovation_activity / ...)",
-            key="sig_company_bycat_cat",
-        )
-        limit = st.number_input(
-            "Limit", min_value=1, max_value=1000, value=200, key="sig_company_bycat_limit"
-        )
-        if st.button("GET /companies/{id}/signals/{category}"):
-            if not company_id.strip() or not category.strip():
-                st.error("Company ID and category are required.")
-            else:
-                try:
-                    url = _api_url(
-                        api_base, api_prefix, f"/companies/{company_id.strip()}/signals/{category.strip()}"
-                    )
-                    data = _request_json("GET", url, params={"limit": int(limit)}, timeout=timeout)
-                    items = data.get("items") if isinstance(data, dict) else data
-                    st.dataframe(items or [], use_container_width=True)
-                except requests.HTTPError as exc:
-                    _show_http_error(exc)
-                except Exception as exc:
-                    st.error(f"Get signals by category failed: {exc}")
-
-    with sig_tabs[4]:
-        st.caption("If your API has GET /signals/{signal_id}, test it here.")
-        signal_id = st.text_input("Signal ID", key="sig_get_id")
-        if st.button("GET /signals/{signal_id}"):
+    with tabs[1]:
+        signal_id = st.text_input("Signal ID", key="signals_get_id")
+        if st.button("GET /signals/{signal_id}", key="signals_get_btn"):
             if not signal_id.strip():
-                st.error("Signal ID is required.")
+                st.error("Signal ID is required")
             else:
                 try:
                     url = _api_url(api_base, api_prefix, f"/signals/{signal_id.strip()}")
-                    data = _request_json("GET", url, timeout=timeout)
-                    st.json(data)
+                    out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
                     st.error(f"Get signal failed: {exc}")
 
 # ============================================================
-# CS2: Evidence
+# Signal Summaries
 # ============================================================
 
-with main_tabs[4]:
-    st.subheader("Evidence")
-    # FIXED: labels match content
-    ev_tabs = st.tabs(["Company Evidence", "Backfill", "Stats"])
+with main_tabs[6]:
+    tabs = st.tabs(["List", "Compute"])
 
-    with ev_tabs[0]:
-        st.caption("Get all evidence for a company.")
-        company_id = st.text_input("Company ID (UUID)", key="evidence_company_id")
-        if st.button("GET /companies/{id}/evidence"):
-            if not company_id.strip():
-                st.error("Company ID is required.")
+    with tabs[0]:
+        ticker = st.text_input("Ticker (optional)", key="summaries_list_ticker")
+        limit = st.number_input("Limit", min_value=1, max_value=200, value=50, key="summaries_list_limit")
+        if st.button("GET /signal-summaries", key="summaries_list_btn"):
+            try:
+                params: dict[str, Any] = {"limit": int(limit)}
+                if ticker.strip():
+                    params["ticker"] = ticker.strip().upper()
+                url = _api_url(api_base, api_prefix, "/signal-summaries")
+                out = _request_json("GET", url, params=params, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(out)
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"List signal summaries failed: {exc}")
+
+    with tabs[1]:
+        with st.form("summaries_compute_form"):
+            ticker = st.text_input("Ticker", key="summaries_compute_ticker")
+            include_as_of = st.checkbox("Include as_of date", value=False)
+            as_of_date = st.date_input("as_of", value=date.today(), key="summaries_compute_as_of")
+            submitted = st.form_submit_button("POST /signal-summaries/compute")
+
+        if submitted:
+            if not ticker.strip():
+                st.error("Ticker is required")
             else:
+                params: dict[str, Any] = {"ticker": ticker.strip().upper()}
+                if include_as_of:
+                    params["as_of"] = as_of_date.isoformat()
                 try:
-                    url = _api_url(api_base, api_prefix, f"/companies/{company_id.strip()}/evidence")
-                    data = _request_json("GET", url, timeout=timeout)
-                    st.json(data)
+                    url = _api_url(api_base, api_prefix, "/signal-summaries/compute")
+                    out = _request_json("POST", url, params=params, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
-                    st.error(f"Get company evidence failed: {exc}")
+                    st.error(f"Compute summary failed: {exc}")
 
-    with ev_tabs[1]:
-        st.caption("Backfill evidence for all 10 companies.")
-        if st.button("POST /evidence/backfill"):
-            try:
-                url = _api_url(api_base, api_prefix, "/evidence/backfill")
-                data = _request_json("POST", url, json={}, timeout=timeout)
-                st.success("Queued")
-                st.json(data)
-            except requests.HTTPError as exc:
-                _show_http_error(exc)
-            except Exception as exc:
-                st.error(f"Backfill failed: {exc}")
 
-    with ev_tabs[2]:
-        st.caption("Evidence collection statistics.")
-        if st.button("GET /evidence/stats"):
+# ============================================================
+# Evidence
+# ============================================================
+
+with main_tabs[7]:
+    tabs = st.tabs(["Stats", "List Documents", "Get Document", "Get Document Chunks"])
+
+    with tabs[0]:
+        if st.button("GET /evidence/stats", key="evidence_stats_btn"):
             try:
                 url = _api_url(api_base, api_prefix, "/evidence/stats")
-                data = _request_json("GET", url, timeout=timeout)
-                st.json(data)
+                out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(out)
             except requests.HTTPError as exc:
                 _show_http_error(exc)
             except Exception as exc:
-                st.error(f"Stats failed: {exc}")
+                st.error(f"Evidence stats failed: {exc}")
+
+    with tabs[1]:
+        ticker = st.text_input("Ticker (optional)", key="evidence_docs_ticker")
+        company_id = st.text_input("Company ID (optional)", key="evidence_docs_company")
+        limit = st.number_input("Limit", min_value=1, max_value=500, value=100, key="evidence_docs_limit")
+        offset = st.number_input("Offset", min_value=0, value=0, key="evidence_docs_offset")
+        if st.button("GET /evidence/documents", key="evidence_docs_list_btn"):
+            try:
+                params: dict[str, Any] = {"limit": int(limit), "offset": int(offset)}
+                if ticker.strip():
+                    params["ticker"] = ticker.strip().upper()
+                if company_id.strip():
+                    params["company_id"] = company_id.strip()
+                url = _api_url(api_base, api_prefix, "/evidence/documents")
+                out = _request_json("GET", url, params=params, timeout=timeout, headers=headers, verify=verify_tls)
+                _show_payload(out)
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"List evidence documents failed: {exc}")
+
+    with tabs[2]:
+        document_id = st.text_input("Document ID", key="evidence_doc_get_id")
+        if st.button("GET /evidence/documents/{document_id}", key="evidence_doc_get_btn"):
+            if not document_id.strip():
+                st.error("Document ID is required")
+            else:
+                try:
+                    url = _api_url(api_base, api_prefix, f"/evidence/documents/{document_id.strip()}")
+                    out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"Get evidence document failed: {exc}")
+
+    with tabs[3]:
+        document_id = st.text_input("Document ID", key="evidence_chunks_doc_id")
+        limit = st.number_input("Limit", min_value=1, max_value=1000, value=200, key="evidence_chunks_limit")
+        offset = st.number_input("Offset", min_value=0, value=0, key="evidence_chunks_offset")
+        if st.button("GET /evidence/documents/{document_id}/chunks", key="evidence_chunks_btn"):
+            if not document_id.strip():
+                st.error("Document ID is required")
+            else:
+                try:
+                    url = _api_url(api_base, api_prefix, f"/evidence/documents/{document_id.strip()}/chunks")
+                    out = _request_json(
+                        "GET",
+                        url,
+                        params={"limit": int(limit), "offset": int(offset)},
+                        timeout=timeout,
+                        headers=headers,
+                        verify=verify_tls,
+                    )
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"Get evidence chunks failed: {exc}")
+
+
+# ============================================================
+# Scoring
+# ============================================================
+
+with main_tabs[8]:
+    tabs = st.tabs(["Compute", "Latest by Company", "Leaderboard"])
+
+    with tabs[0]:
+        with st.form("scoring_compute_form"):
+            company_id = st.text_input("Company ID")
+            version = st.text_input("Version", value="v1.0")
+            submitted = st.form_submit_button("POST {scoring_prefix}/compute/{company_id}")
+
+        if submitted:
+            if not company_id.strip():
+                st.error("Company ID is required")
+            else:
+                try:
+                    url = _scoring_url(api_base, scoring_prefix, f"/compute/{company_id.strip()}")
+                    out = _request_json(
+                        "POST",
+                        url,
+                        params={"version": version.strip() or "v1.0"},
+                        timeout=max(timeout, 60),
+                        headers=headers,
+                        verify=verify_tls,
+                    )
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"Compute scoring failed: {exc}")
+
+    with tabs[1]:
+        company_id = st.text_input("Company ID", key="scoring_results_company_id")
+        if st.button("GET {scoring_prefix}/results/{company_id}", key="scoring_results_company_btn"):
+            if not company_id.strip():
+                st.error("Company ID is required")
+            else:
+                try:
+                    url = _scoring_url(api_base, scoring_prefix, f"/results/{company_id.strip()}")
+                    out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    _show_payload(out)
+                except requests.HTTPError as exc:
+                    _show_http_error(exc)
+                except Exception as exc:
+                    st.error(f"Get latest company score failed: {exc}")
+
+    with tabs[2]:
+        limit = st.number_input("Limit", min_value=1, max_value=200, value=50, key="scoring_results_limit")
+        if st.button("GET {scoring_prefix}/results", key="scoring_results_list_btn"):
+            try:
+                url = _scoring_url(api_base, scoring_prefix, "/results")
+                out = _request_json(
+                    "GET",
+                    url,
+                    params={"limit": int(limit)},
+                    timeout=timeout,
+                    headers=headers,
+                    verify=verify_tls,
+                )
+                _show_payload(out)
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"Get score leaderboard failed: {exc}")
+
+# ============================================================
+# Scripts
+# ============================================================
+
+with main_tabs[9]:
+    scripts = _list_repo_scripts()
+
+    st.caption("Run repository scripts from the Streamlit UI (working directory: repo root).")
+    st.write(f"Scripts directory: `{SCRIPTS_DIR}`")
+
+    if not scripts:
+        st.warning("No scripts found")
+    else:
+        st.dataframe([{"script": s} for s in scripts], use_container_width=True)
+
+        script_name = st.selectbox("Script", scripts, key="scripts_selected")
+        script_args = st.text_input("Arguments", value="", key="scripts_args")
+        script_timeout = st.number_input("Timeout (seconds)", min_value=1, max_value=7200, value=600, key="scripts_timeout")
+
+        if st.button("Run Script", key="scripts_run_btn"):
+            script_path = SCRIPTS_DIR / script_name
+            if not script_path.exists():
+                st.error(f"Script not found: {script_path}")
+            else:
+                cmd = [sys.executable, str(script_path)]
+                if script_args.strip():
+                    try:
+                        cmd.extend(shlex.split(script_args.strip(), posix=(os.name != "nt")))
+                    except ValueError as exc:
+                        st.error(f"Invalid arguments: {exc}")
+                        st.stop()
+
+                st.code("$ " + " ".join(shlex.quote(x) for x in cmd), language="bash")
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        cwd=str(ROOT_DIR),
+                        capture_output=True,
+                        text=True,
+                        timeout=int(script_timeout),
+                    )
+                    st.write(f"Exit code: {proc.returncode}")
+                    if proc.stdout:
+                        st.subheader("STDOUT")
+                        st.code(proc.stdout)
+                    if proc.stderr:
+                        st.subheader("STDERR")
+                        st.code(proc.stderr)
+                except subprocess.TimeoutExpired as exc:
+                    st.error(f"Script timed out after {script_timeout} seconds")
+                    if exc.stdout:
+                        st.subheader("Partial STDOUT")
+                        st.code(exc.stdout)
+                    if exc.stderr:
+                        st.subheader("Partial STDERR")
+                        st.code(exc.stderr)
+                except Exception as exc:
+                    st.error(f"Script execution failed: {exc}")
+
+        st.divider()
+        st.caption("Common examples")
+        st.code(
+            "python scripts/collect_evidence.py --companies all\n"
+            "python scripts/collect_signals.py --companies NVDA,JPM\n"
+            "python scripts/run_scoring_engine.py --batch --tickers NVDA,JPM --version v1.0"
+        )
+
+
+# ============================================================
+# Raw API
+# ============================================================
+
+with main_tabs[10]:
+    st.caption("Manual API console for any path/method.")
+
+    method = st.selectbox("Method", ["GET", "POST", "PUT", "PATCH", "DELETE"], key="raw_method")
+    path = st.text_input("Path", value="/companies", key="raw_path")
+    include_prefix = st.checkbox("Include API Prefix", value=True, key="raw_include_prefix")
+    params_text = st.text_area("Query Params JSON", value="{}", key="raw_params")
+    body_text = st.text_area("Request Body JSON", value="{}", key="raw_body")
+
+    if st.button("Send Request", key="raw_send_btn"):
+        if not path.strip().startswith("/"):
+            st.error("Path must start with '/'")
+        else:
+            ok_params, params_obj = _parse_json_input("Query Params", params_text)
+            if not ok_params:
+                st.stop()
+            if not isinstance(params_obj, dict):
+                st.error("Query Params JSON must be an object")
+                st.stop()
+
+            req_kwargs: dict[str, Any] = {
+                "timeout": timeout,
+                "headers": headers,
+                "verify": verify_tls,
+                "params": params_obj,
+            }
+
+            if method in {"POST", "PUT", "PATCH", "DELETE"}:
+                ok_body, body_obj = _parse_json_input("Request Body", body_text)
+                if not ok_body:
+                    st.stop()
+                if body_text.strip():
+                    req_kwargs["json"] = body_obj
+
+            try:
+                url = _api_url(api_base, api_prefix, path.strip(), include_prefix=include_prefix)
+                resp = _request(method, url, **req_kwargs)
+                st.write(f"Status: {resp.status_code}")
+                if not resp.ok:
+                    raise requests.HTTPError(resp.text, response=resp)
+                if resp.text.strip():
+                    try:
+                        _show_payload(resp.json())
+                    except ValueError:
+                        st.code(resp.text)
+                else:
+                    st.info("No content")
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"Raw request failed: {exc}")

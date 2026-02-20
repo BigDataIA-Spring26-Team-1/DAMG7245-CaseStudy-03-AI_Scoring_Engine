@@ -16,7 +16,7 @@ from app.services.s3_storage import is_s3_configured, upload_json, upload_text
 from app.services.signal_store import SignalStore
 from app.pipelines.external_signals import ExternalSignalCollector, sha256_text
 from app.pipelines.job_signals import normalize_job_rows, parse_jobs_rss, summarize_job_signals
-from app.pipelines.patent_signals import parse_patents_rss, summarize_patent_signals
+from app.pipelines.patent_signals import parse_patents_payload, summarize_patent_signals
 from app.pipelines.tech_signals import summarize_tech_signals
  
 # TechStackCollector is optional depending on your file.
@@ -82,6 +82,15 @@ def _safe_get_patents_rss(collector: ExternalSignalCollector, query: str) -> Tup
     Returns (url, rss_text, source_label).
     We try a dedicated method if your collector has it; otherwise we fallback to Google News RSS with a "patent" query.
     """
+    # Prefer SerpApi Google Patents if configured
+    if hasattr(collector, "google_patents_serpapi"):
+        fn = getattr(collector, "google_patents_serpapi")
+        try:
+            url, payload = fn(query, num=20, page=1)
+            return url, json.dumps(payload), "serpapi_google_patents"
+        except Exception:
+            pass
+
     # If you implemented something like patents_uspto_stub(query)
     if hasattr(collector, "patents_uspto_stub"):
         fn = getattr(collector, "patents_uspto_stub")
@@ -378,7 +387,7 @@ def main() -> int:
                 _write_text(out_dir / "patents_rss.txt", patents_rss)
  
             if patents_rss:
-                patent_mentions = parse_patents_rss(patents_rss)
+                patent_mentions = parse_patents_payload(patents_rss, pat_source)
                 patent_summary = summarize_patent_signals(patent_mentions)
                 pat_hash = sha256_text(f"patents_rss|{ticker}|{patents_rss}")
                 if store.signal_exists_by_hash(pat_hash):

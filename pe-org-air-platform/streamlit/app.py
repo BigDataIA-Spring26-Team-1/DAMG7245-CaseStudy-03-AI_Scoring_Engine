@@ -162,12 +162,12 @@ def _inject_ui_theme() -> None:
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap');
 
 :root {
-    --ui-ink: #17384f;
-    --ui-accent: #1473e6;
-    --ui-accent-soft: #43b8ff;
-    --ui-warm: #ff8a2b;
-    --ui-border: #cde2f7;
-    --ui-card: rgba(255, 255, 255, 0.85);
+    --ui-ink: #e8f1ff;
+    --ui-muted: #9eb3cc;
+    --ui-accent: #2c8bff;
+    --ui-accent-soft: #31c6e6;
+    --ui-border: #2a3d57;
+    --ui-card: rgba(14, 24, 38, 0.88);
 }
 
 html, body, [class*="css"] {
@@ -177,9 +177,9 @@ html, body, [class*="css"] {
 
 .stApp {
     background:
-        radial-gradient(1000px 550px at 6% -10%, #d9ecff 0%, transparent 58%),
-        radial-gradient(1100px 700px at 96% -12%, #ffe4c2 0%, transparent 57%),
-        linear-gradient(180deg, #f4f9ff 0%, #fef8ef 100%);
+        radial-gradient(1000px 600px at 10% -15%, rgba(44, 139, 255, 0.22) 0%, transparent 60%),
+        radial-gradient(1200px 680px at 96% -18%, rgba(49, 198, 230, 0.18) 0%, transparent 62%),
+        linear-gradient(180deg, #070e18 0%, #0c1726 58%, #111b2c 100%);
 }
 
 [data-testid="stHeader"] {
@@ -191,11 +191,11 @@ html, body, [class*="css"] {
 }
 
 section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #133750 0%, #1a5579 100%);
+    background: linear-gradient(180deg, #0a121f 0%, #0f2136 100%);
 }
 
 section[data-testid="stSidebar"] * {
-    color: #ecf5ff !important;
+    color: #dce8f8 !important;
 }
 
 div[data-baseweb="tab-list"] {
@@ -203,7 +203,7 @@ div[data-baseweb="tab-list"] {
     padding: 0.35rem;
     border: 1px solid var(--ui-border);
     border-radius: 12px;
-    background: rgba(255, 255, 255, 0.72);
+    background: rgba(8, 16, 28, 0.8);
     backdrop-filter: blur(6px);
 }
 
@@ -211,7 +211,7 @@ button[data-baseweb="tab"] {
     border-radius: 10px !important;
     padding: 0.4rem 0.9rem !important;
     font-weight: 700 !important;
-    color: #29506b !important;
+    color: #9cb2cb !important;
     transition: transform 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
 }
 
@@ -221,8 +221,8 @@ button[data-baseweb="tab"]:hover {
 
 button[data-baseweb="tab"][aria-selected="true"] {
     color: #ffffff !important;
-    background: linear-gradient(90deg, var(--ui-accent) 0%, #1f93ff 100%) !important;
-    box-shadow: 0 7px 16px rgba(20, 115, 230, 0.28);
+    background: linear-gradient(90deg, var(--ui-accent) 0%, #22a5ff 100%) !important;
+    box-shadow: 0 7px 16px rgba(34, 165, 255, 0.32);
 }
 
 div.stButton > button,
@@ -235,8 +235,8 @@ div[data-testid="stForm"] button[kind] {
     font-weight: 700;
     letter-spacing: 0.2px;
     color: #ffffff;
-    background: linear-gradient(135deg, var(--ui-accent) 0%, #1d8fff 60%, var(--ui-accent-soft) 100%);
-    box-shadow: 0 8px 22px rgba(20, 115, 230, 0.28);
+    background: linear-gradient(135deg, var(--ui-accent) 0%, #249bff 58%, var(--ui-accent-soft) 100%);
+    box-shadow: 0 8px 22px rgba(44, 139, 255, 0.34);
     transition: transform 0.18s ease, box-shadow 0.22s ease, filter 0.18s ease;
 }
 
@@ -244,7 +244,7 @@ div.stButton > button:hover,
 div.stDownloadButton > button:hover,
 div[data-testid="stForm"] button[kind]:hover {
     transform: translateY(-2px) scale(1.01);
-    box-shadow: 0 12px 28px rgba(20, 115, 230, 0.34);
+    box-shadow: 0 12px 28px rgba(44, 139, 255, 0.38);
 }
 
 div.stButton > button::after,
@@ -278,22 +278,43 @@ div[data-testid="stTable"] {
     border: 1px solid var(--ui-border);
     border-radius: 12px;
     overflow: hidden;
-    box-shadow: 0 10px 24px rgba(13, 55, 89, 0.09);
+    box-shadow: 0 10px 24px rgba(1, 8, 16, 0.45);
 }
 
 div[data-testid="stMetric"] {
     background: var(--ui-card);
     border: 1px solid var(--ui-border);
     border-radius: 12px;
-    box-shadow: 0 8px 20px rgba(13, 55, 89, 0.08);
+    box-shadow: 0 8px 20px rgba(0, 8, 18, 0.4);
 }
 
 div.stTextInput > div > div > input,
 div.stNumberInput > div > div > input,
 div.stTextArea textarea {
     border-radius: 10px !important;
-    border: 1px solid #c9ddf3 !important;
-    background-color: rgba(255, 255, 255, 0.9) !important;
+    border: 1px solid var(--ui-border) !important;
+    background-color: rgba(11, 21, 35, 0.92) !important;
+    color: var(--ui-ink) !important;
+}
+
+div.stTextInput > div > div > input::placeholder,
+div.stNumberInput > div > div > input::placeholder,
+div.stTextArea textarea::placeholder {
+    color: var(--ui-muted) !important;
+}
+
+label, p, span, .stMarkdown, [data-testid="stMarkdownContainer"], .stCaption {
+    color: var(--ui-ink) !important;
+}
+
+div[data-testid="stAlert"] {
+    border-radius: 12px;
+}
+
+div[data-testid="stCodeBlock"] pre {
+    border: 1px solid var(--ui-border);
+    border-radius: 12px;
+    background: rgba(6, 14, 24, 0.95) !important;
 }
 
 @keyframes click-pop {

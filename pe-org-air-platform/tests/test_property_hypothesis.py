@@ -1,11 +1,13 @@
 from __future__ import annotations
  
-import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
  
-hypothesis = pytest.importorskip("hypothesis")
-from hypothesis import given, settings, strategies as st
- 
-settings.register_profile("cs3", max_examples=500)
+settings.register_profile(
+    "cs3",
+    max_examples=500,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 settings.load_profile("cs3")
  
 from app.scoring_engine.evidence_mapper import EvidenceMapper, EvidenceScore, SignalSource

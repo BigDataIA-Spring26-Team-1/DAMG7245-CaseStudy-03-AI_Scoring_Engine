@@ -22,20 +22,6 @@ from app.services.snowflake import get_snowflake_connection
 router = APIRouter(prefix="/collection")
 logger = logging.getLogger("uvicorn.error")
  
-DEFAULT_TICKERS = ["CAT", "DE", "UNH", "HCA", "ADP", "PAYX", "WMT", "TGT", "JPM", "GS"]
-DEFAULT_COMPANY_NAMES = {
-    "CAT": "Caterpillar",
-    "DE": "Deere",
-    "UNH": "UnitedHealth",
-    "HCA": "HCA Healthcare",
-    "ADP": "ADP",
-    "PAYX": "Paychex",
-    "WMT": "Walmart",
-    "TGT": "Target",
-    "JPM": "JPMorgan",
-    "GS": "Goldman Sachs",
-}
- 
 _TASK_TTL_SECONDS = 24 * 60 * 60
 _TASK_MAX_LOCAL = 2000
 _TICKER_PATTERN = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
@@ -123,7 +109,10 @@ def _invalidate_cs2_cache() -> None:
  
 def _parse_requested_tickers(companies: str) -> list[str]:
     if companies.strip().lower() == "all":
-        return list(DEFAULT_TICKERS)
+        tickers = _get_active_tickers()
+        if not tickers:
+            raise HTTPException(status_code=404, detail="No active companies found in database")
+        return tickers
  
     tickers = [t.strip().upper() for t in companies.split(",") if t.strip()]
     if not tickers:
@@ -135,15 +124,41 @@ def _parse_requested_tickers(companies: str) -> list[str]:
  
     # Preserve order while removing duplicates.
     return list(dict.fromkeys(tickers))
- 
- 
-def _get_company_id(ticker: str) -> str | None:
+
+
+def _get_active_tickers() -> list[str]:
     conn = get_snowflake_connection()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT id
+            SELECT DISTINCT ticker
+            FROM companies
+            WHERE is_deleted = FALSE
+              AND ticker IS NOT NULL
+            ORDER BY ticker
+            """
+        )
+        return [str(r[0]).upper() for r in (cur.fetchall() or []) if r and r[0]]
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _get_company_id(ticker: str) -> str | None:
+    profile = _get_company_profile(ticker)
+    if profile is None:
+        return None
+    return profile["id"]
+
+
+def _get_company_profile(ticker: str) -> dict[str, str] | None:
+    conn = get_snowflake_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, name
             FROM companies
             WHERE ticker=%s AND is_deleted=FALSE
             ORDER BY created_at DESC
@@ -156,7 +171,10 @@ def _get_company_id(ticker: str) -> str | None:
             return None
         if len(rows) > 1:
             raise RuntimeError(f"Duplicate active company rows found for ticker={ticker}")
-        return str(rows[0][0])
+        return {
+            "id": str(rows[0][0]),
+            "name": str(rows[0][1] or ticker).strip() or ticker,
+        }
     finally:
         cur.close()
         conn.close()
@@ -181,7 +199,7 @@ def run_collect_evidence(task_id: str, companies: list[str]) -> None:
                 filings = client.list_recent_filings(
                     ticker=ticker,
                     cik_10=cik,
-                    forms=["10-K", "10-Q", "8-K"],
+                    forms=["10-K", "10-Q", "8-K", "DEF-14A"],
                     limit_per_form=1,
                 )
                 for filing in filings:
@@ -286,10 +304,11 @@ def run_collect_signals(task_id: str, companies: list[str]) -> None:
         ticker_errors: list[dict[str, str]] = []
         for ticker in companies:
             try:
-                company_id = _get_company_id(ticker)
-                if not company_id:
+                profile = _get_company_profile(ticker)
+                if not profile:
                     continue
-                name = DEFAULT_COMPANY_NAMES.get(ticker, ticker)
+                company_id = profile["id"]
+                name = profile["name"] or ticker
  
                 jobs_q = f"{name} {ticker} hiring jobs"
                 jobs_url, jobs_rss = collector.google_jobs_rss(jobs_q)

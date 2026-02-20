@@ -33,6 +33,9 @@ PyJWT==2.10.1
 pdfplumber==0.11.8
 pyOpenSSL==25.3.0
 pytest==9.0.2
+pytest-cov==7.0.0
+coverage==7.11.3
+hypothesis==6.148.2
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 pytz==2025.2

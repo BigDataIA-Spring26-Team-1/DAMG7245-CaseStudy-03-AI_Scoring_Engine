@@ -1,22 +1,33 @@
 from __future__ import annotations
-
+ 
 from datetime import date, datetime, timedelta
 from uuid import uuid4
-
+ 
 from fastapi import APIRouter, HTTPException, Query
-
+ 
+from app.config import settings
+from app.services.redis_cache import cache_delete_pattern, cache_get_json, cache_set_json
 from app.services.snowflake import get_snowflake_connection
-
+ 
 router = APIRouter(prefix="/signal-summaries")
-
-
+ 
+ 
+def _summaries_list_cache_key(ticker: str | None, limit: int) -> str:
+    t = ticker.strip().upper() if ticker else "all"
+    return f"signal_summaries:list:ticker:{t}:limit:{limit}"
+ 
+ 
 @router.get("")
 def list_summaries(
     ticker: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ):
     ticker_norm = ticker.strip().upper() if ticker else None
-
+    cache_key = _summaries_list_cache_key(ticker=ticker_norm, limit=limit)
+    cached = cache_get_json(cache_key)
+    if cached is not None:
+        return cached
+ 
     conn = get_snowflake_connection()
     cur = conn.cursor()
     try:
@@ -29,12 +40,14 @@ def list_summaries(
         """
         cur.execute(q, (ticker_norm, ticker_norm, limit))
         cols = [c[0].lower() for c in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+        out = [dict(zip(cols, r)) for r in cur.fetchall()]
+        cache_set_json(cache_key, out, settings.redis_ttl_seconds)
+        return out
     finally:
         cur.close()
         conn.close()
-
-
+ 
+ 
 @router.post("/compute")
 def compute_summary(
     ticker: str = Query(..., description="Ticker like CAT"),
@@ -43,7 +56,7 @@ def compute_summary(
     ticker_norm = ticker.strip().upper()
     as_of_date = as_of or date.today()
     window_end = datetime.combine(as_of_date + timedelta(days=1), datetime.min.time()).isoformat(sep=" ")
-
+ 
     conn = get_snowflake_connection()
     cur = conn.cursor()
     try:
@@ -64,7 +77,7 @@ def compute_summary(
         if len(rows) > 1:
             raise HTTPException(status_code=409, detail=f"Duplicate companies found for ticker={ticker_norm}")
         company_id = str(rows[0][0])
-
+ 
         # 2) Pull recent signals (last 7 days ending at as_of_date)
         cur.execute(
             """
@@ -79,11 +92,11 @@ def compute_summary(
             (ticker_norm, window_end, window_end),
         )
         breakdown = cur.fetchall()
-
+ 
         signal_count = sum(int(r[1]) for r in breakdown) if breakdown else 0
         parts = [f"{st}: {cnt}" for (st, cnt) in breakdown] if breakdown else ["No recent signals found (last 7 days)"]
         summary_text = f"Signals last 7 days for {ticker_norm}: " + ", ".join(parts)
-
+ 
         # 3) Upsert into company_signal_summaries
         sid = str(uuid4())
         cur.execute(
@@ -114,13 +127,15 @@ def compute_summary(
                 signal_count,
             ),
         )
-
-        return {
+ 
+        out = {
             "ticker": ticker_norm,
             "as_of_date": str(as_of_date),
             "signal_count": signal_count,
             "summary_text": summary_text,
         }
+        cache_delete_pattern("signal_summaries:list:*")
+        return out
     finally:
         cur.close()
         conn.close()

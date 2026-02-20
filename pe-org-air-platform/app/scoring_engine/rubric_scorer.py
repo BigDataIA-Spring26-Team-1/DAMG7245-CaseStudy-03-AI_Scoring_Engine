@@ -129,5 +129,7 @@ def score_dimension_features(features: Dict[str, DimensionFeature]) -> List[Dime
                 reasons=reasons,
             )
         )
+        print("DEBUG rubric count:", len(results))
+        print("DEBUG rubric dims:", [r.dimension for r in results])
 
     return results

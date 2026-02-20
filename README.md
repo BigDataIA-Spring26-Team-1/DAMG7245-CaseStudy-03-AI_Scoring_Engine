@@ -380,25 +380,28 @@ The Streamlit dashboard provides an end-to-end interface for the full PE Org-AI-
 - **Signals** — Collect and inspect external AI signals by category
 - **Evidence** — Review company-level evidence and backfill missing data
 
+
 This project is hosted [here](https://pe-org-ai-r.streamlit.app/)
 
-Backend (API endpoints) is hosted [here](https://my-project-zeta-jet-67.vercel.app/docs)
+Backend (API endpoints) is hosted [here](https://my-project-zeta-jet-67.vercel.app/)
+
 
 ---
 
 ## Architecture Diagram
 
-The system architecture diagram illustrating the end-to-end scoring pipeline — from CS2 evidence inputs through the scoring engine to Snowflake persistence and the FastAPI/Streamlit layer — is available below:
+The system architecture diagram illustrating ingestion, processing, storage, and data flow can be found below:
 
-![Architecture Diagram](architecture.png)
+![Architecture Diagram](docs/architecture.png)
 
 ---
 
+
 ## Video Recording
 
-A walkthrough video explaining the system design, scoring methodology, pipeline execution, and live demonstration is available at:
+A walkthrough video explaining the system design, pipeline execution, and outputs is available at:
 
-[![Project Walkthrough Video – CS3 AI Scoring Engine](https://img.youtube.com/vi/placeholder/0.jpg)](https://www.youtube.com/watch?v=placeholder)
+[![Project Walkthrough Video](https://img.youtube.com/vi/xkXbRhARyAI/0.jpg)](https://www.youtube.com/watch?v=xkXbRhARyAI)
 
 > **PE Org AI R Platform – Financial Grade AI Scoring Engine | Case Study 3**
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict
  
+ 
 DIMENSIONS = [
     "data_infrastructure",
     "ai_governance",
@@ -20,72 +21,105 @@ class SourceProfile:
     dim_weights: Dict[str, float]
  
  
+def _profile(reliability: float, **weights: float) -> SourceProfile:
+    return SourceProfile(reliability=reliability, dim_weights=weights)
+ 
+ 
 SOURCE_PROFILES: dict[str, SourceProfile] = {
-    "10k": SourceProfile(
-        reliability=0.90,
-        dim_weights={
-            "leadership_vision": 0.18,
-            "ai_governance": 0.18,
-            "data_infrastructure": 0.14,
-            "technology_stack": 0.14,
-            "use_case_portfolio": 0.16,
-            "culture_change": 0.12,
-            "talent_skills": 0.08,
-        },
+    # CS2 4-signal categories
+    "technology_hiring": _profile(
+        0.85,
+        data_infrastructure=0.10,
+        technology_stack=0.20,
+        talent_skills=0.70,
+        culture_change=0.10,
     ),
-    "jobs": SourceProfile(
-        reliability=0.75,
-        dim_weights={
-            "talent_skills": 0.40,
-            "technology_stack": 0.20,
-            "data_infrastructure": 0.15,
-            "use_case_portfolio": 0.10,
-            "ai_governance": 0.05,
-            "leadership_vision": 0.05,
-            "culture_change": 0.05,
-        },
+    "innovation_activity": _profile(
+        0.80,
+        data_infrastructure=0.20,
+        technology_stack=0.50,
+        use_case_portfolio=0.30,
     ),
-    "news": SourceProfile(
-        reliability=0.60,
-        dim_weights={
-            "leadership_vision": 0.20,
-            "use_case_portfolio": 0.25,
-            "culture_change": 0.20,
-            "ai_governance": 0.10,
-            "technology_stack": 0.10,
-            "data_infrastructure": 0.10,
-            "talent_skills": 0.05,
-        },
+    "digital_presence": _profile(
+        0.70,
+        data_infrastructure=0.60,
+        technology_stack=0.40,
     ),
-    "patents": SourceProfile(
-        reliability=0.70,
-        dim_weights={
-            "use_case_portfolio": 0.30,
-            "technology_stack": 0.20,
-            "data_infrastructure": 0.15,
-            "leadership_vision": 0.10,
-            "talent_skills": 0.15,
-            "ai_governance": 0.05,
-            "culture_change": 0.05,
-        },
+    "leadership_signals": _profile(
+        0.80,
+        ai_governance=0.25,
+        leadership_vision=0.60,
+        culture_change=0.15,
     ),
-    "tech": SourceProfile(
-        reliability=0.65,
-        dim_weights={
-            "technology_stack": 0.45,
-            "data_infrastructure": 0.25,
-            "use_case_portfolio": 0.10,
-            "talent_skills": 0.10,
-            "ai_governance": 0.05,
-            "leadership_vision": 0.03,
-            "culture_change": 0.02,
-        },
+    # SEC section mapping
+    "sec_item_1": _profile(
+        0.90,
+        technology_stack=0.30,
+        use_case_portfolio=0.70,
+    ),
+    "sec_item_1a": _profile(
+        0.90,
+        data_infrastructure=0.20,
+        ai_governance=0.80,
+    ),
+    "sec_item_7": _profile(
+        0.90,
+        data_infrastructure=0.20,
+        leadership_vision=0.50,
+        use_case_portfolio=0.30,
+    ),
+    # CS3 additional collectors
+    "glassdoor_reviews": _profile(
+        0.75,
+        talent_skills=0.10,
+        leadership_vision=0.10,
+        culture_change=0.80,
+    ),
+    "board_composition": _profile(
+        0.90,
+        ai_governance=0.70,
+        leadership_vision=0.30,
+    ),
+    # Backward-compatible aliases used by existing collectors
+    "jobs": _profile(
+        0.85,
+        data_infrastructure=0.10,
+        technology_stack=0.20,
+        talent_skills=0.70,
+        culture_change=0.10,
+    ),
+    "patents": _profile(
+        0.80,
+        data_infrastructure=0.20,
+        technology_stack=0.50,
+        use_case_portfolio=0.30,
+    ),
+    "tech": _profile(
+        0.70,
+        data_infrastructure=0.60,
+        technology_stack=0.40,
+    ),
+    "news": _profile(
+        0.80,
+        ai_governance=0.25,
+        leadership_vision=0.60,
+        culture_change=0.15,
+    ),
+    "10k": _profile(
+        0.90,
+        data_infrastructure=0.20,
+        ai_governance=0.20,
+        technology_stack=0.15,
+        leadership_vision=0.20,
+        use_case_portfolio=0.25,
     ),
 }
  
  
 def normalize_weights(weights: Dict[str, float]) -> Dict[str, float]:
-    s = float(sum(weights.values()))
+    s = float(sum(max(0.0, v) for v in weights.values()))
     if s <= 0:
         return {k: 0.0 for k in weights}
-    return {k: float(v) / s for k, v in weights.items()}
+    return {k: float(max(0.0, v)) / s for k, v in weights.items()}
+ 
+ 

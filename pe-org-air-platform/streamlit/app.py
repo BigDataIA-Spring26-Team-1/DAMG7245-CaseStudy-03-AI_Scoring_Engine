@@ -348,6 +348,253 @@ div[data-testid="stCodeBlock"] pre {
     )
 
 
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_scoring_records(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict) and "composite_score" in item]
+    if isinstance(payload, dict):
+        if "composite_score" in payload:
+            return [payload]
+        items = payload.get("items")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict) and "composite_score" in item]
+    return []
+
+
+def _vega_common_config() -> dict[str, Any]:
+    return {
+        "background": "transparent",
+        "config": {
+            "view": {"stroke": None},
+            "axis": {
+                "labelColor": "#dce8f8",
+                "titleColor": "#dce8f8",
+                "gridColor": "rgba(158, 179, 204, 0.22)",
+                "domainColor": "rgba(158, 179, 204, 0.35)",
+            },
+            "legend": {
+                "labelColor": "#dce8f8",
+                "titleColor": "#dce8f8",
+                "orient": "top",
+            },
+        },
+    }
+
+
+def _hydrate_company_names(
+    company_ids: list[str],
+    api_base: str,
+    api_prefix: str,
+    timeout: int,
+    headers: dict[str, str],
+    verify_tls: bool,
+) -> dict[str, str]:
+    cache = st.session_state.setdefault("company_name_cache", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state["company_name_cache"] = cache
+
+    for company_id in company_ids:
+        cid = str(company_id).strip()
+        if not cid or cid in cache:
+            continue
+        try:
+            url = _api_url(api_base, api_prefix, f"/companies/{cid}")
+            out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+            if isinstance(out, dict):
+                company_name = str(out.get("name", "")).strip()
+                cache[cid] = company_name or cid
+            else:
+                cache[cid] = cid
+        except Exception:
+            cache[cid] = cid
+    return cache
+
+
+def _render_scoring_visuals(records: list[dict[str, Any]], company_names: dict[str, str] | None = None) -> None:
+    if not records:
+        st.info("Load scoring results to render charts.")
+        return
+
+    names = company_names or {}
+    ranked = sorted(records, key=lambda row: _to_float(row.get("composite_score")), reverse=True)
+    preview = ranked[:15]
+    score_min = min(_to_float(r.get("composite_score")) for r in ranked)
+    score_max = max(_to_float(r.get("composite_score")) for r in ranked)
+    avg_score = sum(_to_float(r.get("composite_score")) for r in ranked) / len(ranked)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Tracked Companies", len(ranked))
+    m2.metric("Average Composite Score", f"{avg_score:.2f}")
+    m3.metric("Score Range", f"{score_min:.2f} - {score_max:.2f}")
+
+    leaderboard_data: list[dict[str, Any]] = []
+    scatter_data: list[dict[str, Any]] = []
+    for row in preview:
+        company_id = str(row.get("company_id", "unknown"))
+        company_label = names.get(company_id, company_id)
+        leaderboard_data.append(
+            {
+                "company": company_label,
+                "company_id": company_id,
+                "composite_score": _to_float(row.get("composite_score")),
+                "score_band": str(row.get("score_band", "unknown")).lower(),
+            }
+        )
+
+    for row in ranked:
+        company_id = str(row.get("company_id", "unknown"))
+        company_label = names.get(company_id, company_id)
+        scatter_data.append(
+            {
+                "company": company_label,
+                "company_id": company_id,
+                "vr_score": _to_float(row.get("vr_score")),
+                "composite_score": _to_float(row.get("composite_score")),
+                "synergy_bonus": _to_float(row.get("synergy_bonus")),
+                "talent_penalty": _to_float(row.get("talent_penalty")),
+                "score_band": str(row.get("score_band", "unknown")).lower(),
+            }
+        )
+
+    chart_theme = _vega_common_config()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.caption("Top Composite Scores")
+        st.vega_lite_chart(
+            leaderboard_data,
+            {
+                **chart_theme,
+                "mark": {"type": "bar", "cornerRadiusEnd": 8},
+                "encoding": {
+                    "y": {"field": "company", "type": "nominal", "sort": "-x", "title": None},
+                    "x": {"field": "composite_score", "type": "quantitative", "title": "Composite"},
+                    "color": {
+                        "field": "score_band",
+                        "type": "nominal",
+                        "scale": {"range": ["#31c6e6", "#2c8bff", "#5c8eff", "#f6c85f", "#f08a5d"]},
+                        "title": "Band",
+                    },
+                    "tooltip": [
+                        {"field": "company", "type": "nominal"},
+                        {"field": "company_id", "type": "nominal", "title": "Company ID"},
+                        {"field": "composite_score", "type": "quantitative", "format": ".3f"},
+                        {"field": "score_band", "type": "nominal"},
+                    ],
+                },
+            },
+            use_container_width=True,
+        )
+
+    with col2:
+        st.caption("Composite Score Distribution")
+        st.vega_lite_chart(
+            ranked,
+            {
+                **chart_theme,
+                "mark": {"type": "area", "line": {"color": "#2c8bff"}, "color": {"gradient": "linear", "stops": [{"offset": 0, "color": "rgba(49,198,230,0.6)"}, {"offset": 1, "color": "rgba(44,139,255,0.1)"}]}},
+                "encoding": {
+                    "x": {"field": "composite_score", "type": "quantitative", "bin": {"maxbins": 12}, "title": "Composite Score"},
+                    "y": {"aggregate": "count", "type": "quantitative", "title": "Companies"},
+                    "tooltip": [{"aggregate": "count", "type": "quantitative", "title": "Count"}],
+                },
+            },
+            use_container_width=True,
+        )
+
+    st.caption("VR vs Composite (Bubble size = Synergy bonus, color = Score band)")
+    st.vega_lite_chart(
+        scatter_data,
+        {
+            **chart_theme,
+            "mark": {"type": "circle", "opacity": 0.82, "stroke": "#0b1a2b", "strokeWidth": 1},
+            "encoding": {
+                "x": {"field": "vr_score", "type": "quantitative", "title": "VR Score"},
+                "y": {"field": "composite_score", "type": "quantitative", "title": "Composite Score"},
+                "size": {"field": "synergy_bonus", "type": "quantitative", "title": "Synergy Bonus"},
+                "color": {
+                    "field": "score_band",
+                    "type": "nominal",
+                    "scale": {"range": ["#31c6e6", "#2c8bff", "#5c8eff", "#f6c85f", "#f08a5d"]},
+                    "title": "Score Band",
+                },
+                "tooltip": [
+                    {"field": "company", "type": "nominal"},
+                    {"field": "company_id", "type": "nominal", "title": "Company ID"},
+                    {"field": "vr_score", "type": "quantitative", "format": ".3f"},
+                    {"field": "composite_score", "type": "quantitative", "format": ".3f"},
+                    {"field": "synergy_bonus", "type": "quantitative", "format": ".3f"},
+                    {"field": "talent_penalty", "type": "quantitative", "format": ".3f"},
+                ],
+            },
+        },
+        use_container_width=True,
+    )
+
+
+def _render_company_breakdown(record: dict[str, Any], company_names: dict[str, str] | None = None) -> None:
+    dimensions = record.get("dimension_breakdown")
+    if not isinstance(dimensions, list) or not dimensions:
+        st.info("No dimension breakdown found for this company.")
+        return
+
+    chart_data: list[dict[str, Any]] = []
+    for item in dimensions:
+        if not isinstance(item, dict):
+            continue
+        chart_data.append(
+            {
+                "dimension": str(item.get("dimension", "unknown")).replace("_", " ").title(),
+                "weighted_score": _to_float(item.get("weighted_score")),
+                "raw_score": _to_float(item.get("raw_score")),
+                "confidence": _to_float(item.get("confidence")),
+            }
+        )
+
+    if not chart_data:
+        st.info("No dimension breakdown found for this company.")
+        return
+
+    company_id = str(record.get("company_id", "Unknown Company"))
+    company_label = (company_names or {}).get(company_id, company_id)
+    st.caption(f"Dimension Breakdown: {company_label}")
+    st.vega_lite_chart(
+        chart_data,
+        {
+            **_vega_common_config(),
+            "layer": [
+                {
+                    "mark": {"type": "bar", "cornerRadiusEnd": 8},
+                    "encoding": {
+                        "y": {"field": "dimension", "type": "nominal", "sort": "-x", "title": None},
+                        "x": {"field": "weighted_score", "type": "quantitative", "title": "Weighted Score"},
+                        "color": {
+                            "field": "confidence",
+                            "type": "quantitative",
+                            "scale": {"range": ["#f08a5d", "#31c6e6"]},
+                            "title": "Confidence",
+                        },
+                        "tooltip": [
+                            {"field": "dimension", "type": "nominal"},
+                            {"field": "weighted_score", "type": "quantitative", "format": ".3f"},
+                            {"field": "raw_score", "type": "quantitative", "format": ".3f"},
+                            {"field": "confidence", "type": "quantitative", "format": ".3f"},
+                        ],
+                    },
+                }
+            ],
+        },
+        use_container_width=True,
+    )
+
+
 # ============================================================
 # UI setup
 # ============================================================
@@ -1066,7 +1313,7 @@ with main_tabs[7]:
 # ============================================================
 
 with main_tabs[8]:
-    tabs = st.tabs(["Compute", "Latest by Company", "Leaderboard"])
+    tabs = st.tabs(["Compute", "Latest by Company", "Leaderboard", "Visuals"])
 
     with tabs[0]:
         with st.form("scoring_compute_form"):
@@ -1103,7 +1350,20 @@ with main_tabs[8]:
                 try:
                     url = _scoring_url(api_base, scoring_prefix, f"/results/{company_id.strip()}")
                     out = _request_json("GET", url, timeout=timeout, headers=headers, verify=verify_tls)
+                    st.session_state["scoring_last_company"] = out
                     _show_payload(out)
+                    records = _as_scoring_records(out)
+                    if records:
+                        name_map = _hydrate_company_names(
+                            [str(records[0].get("company_id", ""))],
+                            api_base,
+                            api_prefix,
+                            int(timeout),
+                            headers,
+                            verify_tls,
+                        )
+                        st.divider()
+                        _render_company_breakdown(records[0], name_map)
                 except requests.HTTPError as exc:
                     _show_http_error(exc)
                 except Exception as exc:
@@ -1122,11 +1382,77 @@ with main_tabs[8]:
                     headers=headers,
                     verify=verify_tls,
                 )
+                st.session_state["scoring_last_results"] = out
                 _show_payload(out)
+                records = _as_scoring_records(out)
+                if records:
+                    ids = [str(item.get("company_id", "")) for item in records]
+                    name_map = _hydrate_company_names(
+                        ids,
+                        api_base,
+                        api_prefix,
+                        int(timeout),
+                        headers,
+                        verify_tls,
+                    )
+                    st.divider()
+                    _render_scoring_visuals(records, name_map)
             except requests.HTTPError as exc:
                 _show_http_error(exc)
             except Exception as exc:
                 st.error(f"Get score leaderboard failed: {exc}")
+
+    with tabs[3]:
+        st.caption("Interactive charts for leaderboard and company scoring outputs.")
+        visual_limit = st.number_input(
+            "Leaderboard Limit",
+            min_value=1,
+            max_value=200,
+            value=50,
+            key="scoring_visual_limit",
+        )
+        if st.button("Load Visual Dashboard", key="scoring_visual_load"):
+            try:
+                url = _scoring_url(api_base, scoring_prefix, "/results")
+                out = _request_json(
+                    "GET",
+                    url,
+                    params={"limit": int(visual_limit)},
+                    timeout=timeout,
+                    headers=headers,
+                    verify=verify_tls,
+                )
+                st.session_state["scoring_last_results"] = out
+            except requests.HTTPError as exc:
+                _show_http_error(exc)
+            except Exception as exc:
+                st.error(f"Load scoring visuals failed: {exc}")
+
+        records = _as_scoring_records(st.session_state.get("scoring_last_results"))
+        ids = [str(item.get("company_id", "")) for item in records]
+        name_map = _hydrate_company_names(
+            ids,
+            api_base,
+            api_prefix,
+            int(timeout),
+            headers,
+            verify_tls,
+        ) if ids else {}
+        _render_scoring_visuals(records, name_map)
+
+        company_record = _as_scoring_records(st.session_state.get("scoring_last_company"))
+        if company_record:
+            company_ids = [str(company_record[0].get("company_id", ""))]
+            company_name_map = _hydrate_company_names(
+                company_ids,
+                api_base,
+                api_prefix,
+                int(timeout),
+                headers,
+                verify_tls,
+            )
+            st.divider()
+            _render_company_breakdown(company_record[0], company_name_map)
 
 # ============================================================
 # Scripts

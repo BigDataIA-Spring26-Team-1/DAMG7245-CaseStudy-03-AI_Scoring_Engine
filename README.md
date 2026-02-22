@@ -380,23 +380,16 @@ The Streamlit dashboard provides an end-to-end interface for the full PE Org-AI-
 - **Signals** — Collect and inspect external AI signals by category
 - **Evidence** — Review company-level evidence and backfill missing data
 
-<<<<<<< HEAD
 
 This project is hosted [here](https://pe-org-ai-r.streamlit.app/)
 
-Backend (API endpoints) is hosted [here](https://my-project-zeta-jet-67.vercel.app/)
+Backend (API endpoints) is hosted [here](https://damg-7245-case-study-03-ai-scoring-engine-2trsi90vf.vercel.app)
 
-=======
-This project is hosted [here](https://pe-org-ai-r.streamlit.app/)
-
-Backend (API endpoints) is hosted [here](https://my-project-zeta-jet-67.vercel.app/docs)
->>>>>>> d479163adff5a639aa7a35b5958e547b238a5fec
 
 ---
 
 ## Architecture Diagram
 
-<<<<<<< HEAD
 The system architecture diagram illustrating ingestion, processing, storage, and data flow can be found below:
 
 ![Architecture Diagram](docs/architecture.png)
@@ -409,19 +402,6 @@ The system architecture diagram illustrating ingestion, processing, storage, and
 A walkthrough video explaining the system design, pipeline execution, and outputs is available at:
 
 [![Project Walkthrough Video](https://img.youtube.com/vi/xkXbRhARyAI/0.jpg)](https://www.youtube.com/watch?v=xkXbRhARyAI)
-=======
-The system architecture diagram illustrating the end-to-end scoring pipeline — from CS2 evidence inputs through the scoring engine to Snowflake persistence and the FastAPI/Streamlit layer — is available below:
-
-![Architecture Diagram](architecture.png)
-
----
-
-## Video Recording
-
-A walkthrough video explaining the system design, scoring methodology, pipeline execution, and live demonstration is available at:
-
-[![Project Walkthrough Video – CS3 AI Scoring Engine](https://img.youtube.com/vi/placeholder/0.jpg)](https://www.youtube.com/watch?v=placeholder)
->>>>>>> d479163adff5a639aa7a35b5958e547b238a5fec
 
 > **PE Org AI R Platform – Financial Grade AI Scoring Engine | Case Study 3**
 
@@ -532,13 +512,8 @@ docker compose -f docker/docker-compose.yml up --build
 
 | Tool | Usage |
 |---|---|
-<<<<<<< HEAD
 | **Claude (Anthropic)** | Architecture review, code quality feedback, documentation generation |
 | **GitHub Copilot** | Boilerplate generation, test scaffolding |
-=======
-| **ChatGPT(Codex 5.3)** | Architecture review, code quality feedback, documentation generation |
-| **GitHub Copilot(Claude Opus 4.6)** | Boilerplate generation, test scaffolding |
->>>>>>> d479163adff5a639aa7a35b5958e547b238a5fec
 
 ---
 

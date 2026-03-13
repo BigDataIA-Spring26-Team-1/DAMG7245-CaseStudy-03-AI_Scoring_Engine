@@ -401,7 +401,7 @@ The system architecture diagram illustrating ingestion, processing, storage, and
 
 A walkthrough video explaining the system design, pipeline execution, and outputs is available at:
 
-[![Project Walkthrough Video](https://img.youtube.com/vi/xkXbRhARyAI/0.jpg)](https://www.youtube.com/watch?v=xkXbRhARyAI)
+[![Project Walkthrough Video](https://img.https://www.youtube.com/watch?v=MxrY3OejOJI/0.jpg)](https://www.youtube.com/watch?v=MxrY3OejOJI)
 
 > **PE Org AI R Platform – Financial Grade AI Scoring Engine | Case Study 3**
 

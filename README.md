@@ -381,9 +381,9 @@ The Streamlit dashboard provides an end-to-end interface for the full PE Org-AI-
 - **Evidence** — Review company-level evidence and backfill missing data
 
 
-This project is hosted [here](https://pe-org-ai-readiness.streamlit.app/)
+This project is hosted [here](https://pe-org-ai-readiness-engine.streamlit.app/)
 
-Backend (API endpoints) is hosted [here](https://damg-7245-case-study-03-ai-scoring-engine-2trsi90vf.vercel.app)
+Backend (API endpoints) is hosted [here](https://org-air-api-334893558229.us-central1.run.app/)
 
 
 ---
